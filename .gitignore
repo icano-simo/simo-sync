@@ -33,6 +33,12 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# gcp service account keys -- auth is keyless via vercel oidc, these must never exist
+service-account*.json
+gcp-*.json
+*-credentials.json
+*.key
+
 # vercel
 .vercel
 

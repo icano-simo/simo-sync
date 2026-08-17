@@ -8,6 +8,9 @@
     "start": "next start"
   },
   "dependencies": {
+    "@google-cloud/bigquery": "^9.0.2",
+    "@vercel/oidc": "^3.8.4",
+    "google-auth-library": "^11.0.2",
     "next": "16.3.1",
     "react": "19.2.8",
     "react-dom": "19.2.8"
