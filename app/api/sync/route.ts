@@ -15,7 +15,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { NextRequest } from 'next/server';
 import { getBigQueryClient, normalizeRow } from '@/lib/bigquery';
-import { getSupabaseClient } from '@/lib/supabase';
+import { getSupabaseClient } from '@/lib/supabase-admin';
 
 export const dynamic = 'force-dynamic';
 // ~24,700 rows for leads_v2 alone; the default 15s ceiling is not enough.
