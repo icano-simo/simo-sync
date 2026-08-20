@@ -21,8 +21,15 @@ export type ParsedFile = {
   discardedRows: number;
 };
 
-/** Pasa el valor de una celda a texto sin inventar formatos. */
-function cellToText(value: unknown): string | null {
+/**
+ * Pasa el valor de una celda a texto sin inventar formatos.
+ *
+ * Exportada para `scripts/dump-values.ts`, que necesita la conversión EXACTA
+ * que se manda a BigQuery: una copia parecida en el script haría que la
+ * inspección mostrara algo distinto de lo que se carga, que es justo el error
+ * que el script existe para evitar.
+ */
+export function cellToText(value: unknown): string | null {
   if (value === null || value === undefined) return null;
 
   if (value instanceof Date) {

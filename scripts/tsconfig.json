@@ -1,0 +1,11 @@
+{
+  "//": "Los scripts de scripts/ corren con node directamente (sin bundler) e importan de lib/ con extensión .ts explícita. Eso necesita allowImportingTsExtensions, que no se habilita en el tsconfig de la app para no permitirlo también en el código que sí pasa por el bundler.",
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"]
+  },
+  "include": ["**/*.ts", "**/*.mjs", "../lib/**/*.ts"]
+}
