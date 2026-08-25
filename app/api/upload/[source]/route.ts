@@ -25,6 +25,15 @@ import { getServerClient } from '@/lib/supabase/server';
 import { getBigQueryWriterClient, assertWritableDataset } from '@/lib/bigquery-writer';
 import { getSourceRules, hasSourceRules, type SourceRules } from '@/lib/uploads/sources';
 import { parseXlsx, parseCsv, dropColumns, type ParsedFile } from '@/lib/uploads/parse';
+import {
+  newBatchStamp,
+  reservedCollisions,
+  withBatchMetadata,
+  METADATA_FIELDS,
+  RESERVED_COLUMNS,
+  UPLOAD_BATCH_ID,
+  type LoadRow,
+} from '@/lib/uploads/loadMetadata';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -320,28 +329,98 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
 
   const toLoad = drop.parsed;
 
+  /*
+   * Un archivo que traiga una columna que normalice a `upload_batch_id`,
+   * `uploaded_at` o `row_index` chocaría con la que escribe el cargador: misma
+   * clave en el JSON y campo duplicado en el esquema, con uno de los dos
+   * ganando en silencio. Se rechaza antes de escribir.
+   *
+   * Se chequea SIEMPRE, no sólo en 'append': una fuente puede pasar a acumular
+   * después, y descubrir la colisión recién ahí es descubrirla tarde.
+   */
+  const collisions = reservedCollisions(toLoad.headers);
+  if (collisions.length) {
+    const message =
+      `file column(s) collide with the loader's own columns: ${collisions.join(', ')}; ` +
+      `reserved: ${RESERVED_COLUMNS.join(', ')}`;
+    await writeLog(sb, {
+      source_key: sourceKey,
+      user_email: userEmail,
+      file_name: fileName,
+      rows_loaded: null,
+      status: 'validation_failed',
+      error_message: message,
+    });
+    return Response.json({ ok: false, stage: 'reserved_columns', error: message }, { status: 422 });
+  }
+
+  /*
+   * El lote se sella ACÁ y no dentro del try: el mismo `upload_batch_id` y el
+   * mismo `uploaded_at` tienen que ir en todas las filas de esta carga y en la
+   * consulta que la verifica después.
+   */
+  const batch = newBatchStamp();
+
   // ---- 6-8. Cargar, verificar, registrar -------------------------------
   try {
     assertWritableDataset(sourceRow.target_dataset);
 
-    if (sourceRow.load_mode !== 'replace') {
-      throw new Error(`unsupported load_mode "${sourceRow.load_mode}"; only "replace" is implemented`);
+    /*
+     * 'replace' reescribe la tabla entera; 'append' agrega esta carga a lo que
+     * ya hay. Son dos modelos distintos, no una optimización: una fuente que
+     * acumula períodos ya cerrados no puede reemplazar, porque reescribiría
+     * historia que no cambia y de la que cuelgan datos de otras apps.
+     */
+    const isAppend = sourceRow.load_mode === 'append';
+    if (sourceRow.load_mode !== 'replace' && !isAppend) {
+      throw new Error(
+        `unsupported load_mode "${sourceRow.load_mode}"; expected "replace" or "append"`,
+      );
     }
 
     const bq = getBigQueryWriterClient();
     const table = bq.dataset(sourceRow.target_dataset).table(sourceRow.target_table);
 
-    // Todo STRING: es una tabla de staging y el casteo vive en las vistas de
-    // lending_marts. Con autodetect, una columna que un día viene vacía y otro
-    // trae texto cambiaría de tipo sola y rompería las vistas de golpe.
-    const schema = { fields: parsed.headers.map((name) => ({ name, type: 'STRING' })) };
+    /*
+     * Se escribe SIEMPRE desde `toLoad` -- el archivo ya sin las columnas de
+     * `drop_columns` -- y nunca desde `parsed`.
+     */
+    const stamped = isAppend ? withBatchMetadata(toLoad, batch) : null;
+    const loadRows: LoadRow[] = stamped ? stamped.rows : toLoad.rows;
 
-    const ndjson = parsed.rows.map((r) => JSON.stringify(r)).join('\n');
+    // Las columnas del archivo van todas STRING: es una tabla de staging y el
+    // casteo vive en las vistas. Con autodetect, una columna que un día viene
+    // vacía y otro trae texto cambiaría de tipo sola y rompería las vistas de
+    // golpe. Las tres del cargador van tipadas: las genera él, así que su tipo
+    // no depende de lo que traiga el archivo.
+    const schema = {
+      fields: [
+        ...toLoad.headers.map((name) => ({ name, type: 'STRING' })),
+        ...(stamped ? METADATA_FIELDS.map((f) => ({ name: f.name, type: f.type as string })) : []),
+      ],
+    };
+
+    /*
+     * Guarda redundante con `toLoad`, y existe justamente por eso: una
+     * sustitución mal aplicada ya dejó una vez esta escritura leyendo `parsed`
+     * en lugar de `toLoad`. `drop_columns` se calculaba, se reportaba y se
+     * abortaba por typos igual, el tipo compilaba, y las columnas sensibles se
+     * cargaban de todas formas. Esto convierte esa clase de error en una falla
+     * ruidosa en vez de una fuga silenciosa.
+     */
+    const leaked = drop.dropped.filter((c) => schema.fields.some((f) => f.name === c));
+    if (leaked.length) {
+      throw new Error(
+        `refusing to write: dropped column(s) reached the schema: ${leaked.join(', ')}`,
+      );
+    }
+
+    const ndjson = loadRows.map((r) => JSON.stringify(r)).join('\n');
 
     await new Promise<void>((resolve, reject) => {
       const stream = table.createWriteStream({
         sourceFormat: 'NEWLINE_DELIMITED_JSON',
-        writeDisposition: 'WRITE_TRUNCATE',
+        writeDisposition: isAppend ? 'WRITE_APPEND' : 'WRITE_TRUNCATE',
         createDisposition: 'CREATE_IF_NEEDED',
         schema,
       });
@@ -353,8 +432,18 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
     });
 
     // ---- 7. Verificar leyendo de vuelta --------------------------------
+    /*
+     * En 'append' se cuenta SÓLO este lote. Contar la tabla entera compararía
+     * todos los meses acumulados contra las filas de uno: daría distinto
+     * siempre, y una carga buena quedaría registrada como error.
+     */
     const fq = `\`${bq.projectId}.${sourceRow.target_dataset}.${sourceRow.target_table}\``;
-    const [countRows] = await bq.query({ query: `SELECT COUNT(*) AS n FROM ${fq}` });
+    const [countRows] = isAppend
+      ? await bq.query({
+          query: `SELECT COUNT(*) AS n FROM ${fq} WHERE ${UPLOAD_BATCH_ID} = @batch`,
+          params: { batch: batch.uploadBatchId },
+        })
+      : await bq.query({ query: `SELECT COUNT(*) AS n FROM ${fq}` });
     const rowsInTable = Number(countRows?.[0]?.n ?? 0);
     // El descarte quita COLUMNAS, nunca filas: el conteo esperado sigue siendo
     // el del archivo parseado.
@@ -377,6 +466,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
         fuente: sourceRow.display_name,
         archivo: fileName,
         destino: `${sourceRow.target_dataset}.${sourceRow.target_table}`,
+        modo: sourceRow.load_mode,
+        // Sólo en 'append': en 'replace' la tabla entera es la carga.
+        upload_batch_id: isAppend ? batch.uploadBatchId : null,
         filas_parseadas: toLoad.rows.length,
         filas_en_tabla: rowsInTable,
         filas_descartadas: parsed.discardedRows,

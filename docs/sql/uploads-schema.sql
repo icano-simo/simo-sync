@@ -22,7 +22,7 @@ create table if not exists uploads.source (
     display_name      text    not null,
     target_dataset    text    not null,           -- 'lending_marts'
     target_table      text    not null,           -- 'encompass_loans_stage'
-    load_mode         text    not null,           -- 'replace'
+    load_mode         text    not null,           -- 'replace' | 'append'
     min_rows_expected int     not null,           -- salvaguarda: aborta si el archivo viene corto
     sheet_name        text,                       -- 'Data' para Encompass; null para csv
     is_active         boolean not null default true,
@@ -33,6 +33,8 @@ create table if not exists uploads.source (
 
 comment on table uploads.source is
     'Configuración por fuente. Una fuente nueva se da de alta acá sin desplegar código; lib/uploads/sources.ts sólo tiene lo que no se puede expresar como configuración.';
+comment on column uploads.source.load_mode is
+    'replace: WRITE_TRUNCATE, la tabla entera es la carga. append: WRITE_APPEND, cada carga es un periodo y se acumulan. En append el cargador agrega upload_batch_id, uploaded_at y row_index; en replace no, porque el lote seria la tabla y el orden no sobrevive igual.';
 comment on column uploads.source.header_row is
     'Fila del encabezado, 1-based. El roster de USA trae "Search:" en la 1 y los encabezados en la 2.';
 comment on column uploads.source.required_columns is
@@ -202,6 +204,47 @@ on conflict (source_key) do nothing;
 --     ],
 --     drop_columns     = '{}'
 -- where source_key = 'encompass';
+
+-- ---------------------------------------------------------------------------
+-- Fuente que ACUMULA (load_mode = 'append')
+-- ---------------------------------------------------------------------------
+-- Cada carga es un periodo. Una vez cerrado, esas filas no cambian, asi que
+-- reemplazar reescribiria historia definitiva -- y de esas transacciones cuelgan
+-- repartos de centro de costo y notas de otras apps.
+--
+-- El cargador agrega tres columnas que NO vienen del archivo:
+--     upload_batch_id  STRING     un uuid por carga
+--     uploaded_at      TIMESTAMP  cuando se cargo (el mismo en todas las filas)
+--     row_index        INT64      posicion dentro de ESA carga, desde 1
+--
+-- row_index no identifica una fila: se recalcula en cada carga y solo significa
+-- algo junto con upload_batch_id. Hace falta cuando el orden ES el dato -- un
+-- valor que aparece una vez al abrir un bloque y hay que arrastrar hacia abajo.
+-- Una tabla de BigQuery no tiene orden propio, asi que sin esta columna las
+-- filas siguientes se atribuyen a lo que el motor devuelva primero: no falla,
+-- da otro resultado.
+--
+-- Subir dos veces el mismo periodo NO borra nada. La vista se queda con la
+-- carga mas reciente y la anterior queda como rastro; con estas columnas eso es
+-- un QUALIFY ROW_NUMBER() OVER (PARTITION BY <periodo>
+-- ORDER BY uploaded_at DESC, upload_batch_id) = 1. Conviene desempatar tambien
+-- por upload_batch_id: todas las filas de un lote comparten uploaded_at, asi
+-- que si dos cargas cayeran en el mismo instante el orden quedaria indefinido.
+--
+-- Los valores reales de target_table y required_columns salen del archivo, que
+-- todavia no se vio. Queda inactiva hasta entonces: is_active = false.
+--
+-- insert into uploads.source (
+--     source_key, display_name, target_dataset, target_table,
+--     load_mode, min_rows_expected, sheet_name, is_active,
+--     header_row, required_columns, drop_columns
+-- )
+-- values (
+--     'blast', 'Blast', 'lending_marts', '<tabla destino>',
+--     'append', <minimo de filas>, '<hoja>', false,
+--     1, array['<columna cruda 1>', '<columna cruda 2>'], '{}'
+-- )
+-- on conflict (source_key) do nothing;
 
 -- Asignar la fuente a quien la vaya a cargar. Sin una fila acá, la persona entra
 -- a la app y no ve ninguna fuente -- que es el comportamiento correcto.
