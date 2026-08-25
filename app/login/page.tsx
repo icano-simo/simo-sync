@@ -1,90 +1,138 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
+import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { getSupabaseClient } from '@/lib/supabase/client';
-import { DEFAULT_LANDING } from '@/lib/auth/routes';
-import '@/app/styles/app.css';
+import { hasAppAccess } from '@/lib/auth/appAccess';
+import { DEFAULT_LANDING, NO_ACCESS_PATH } from '@/lib/auth/routes';
+import '@/app/styles/auth.css';
 
 /**
- * Login con email/password de Supabase Auth contra simoOS-prod.
+ * ============================================================================
+ * LOGIN — Supabase Auth (email + contraseña)
+ * ============================================================================
  *
- * El login se hace con el MISMO cliente del navegador que usa el resto de la
- * app (`getSupabaseClient`), que guarda la sesión en cookies: es lo que permite
- * que el gate del servidor la vea y que el fetch de subida viaje autenticado.
+ * Mismo proyecto de Supabase y mismos usuarios que el resto del portal: no se
+ * crea ningún sistema de auth propio, sólo se inicia sesión contra simoOS-prod.
  *
- * No se comprueba `allowed_apps` acá. De eso se encarga el gate en el redirect
- * siguiente, que es un único lugar y no puede quedar desincronizado.
+ * Se firma con `getSupabaseClient()` -- el MISMO cliente que después usa la app.
+ * Eso es lo que hace que el JWT viaje solo: `signInWithPassword` deja la sesión
+ * guardada en ese cliente (en cookies, ver lib/supabase/client.ts), y el gate
+ * del servidor y el fetch de subida la ven desde ahí. Con una instancia
+ * distinta, la app seguiría llamando como `anon`.
+ *
+ * Markup y estilo portados de homesi-reporte-actividad sin cambios; lo único
+ * propio de esta app es a dónde entra (DEFAULT_LANDING = /uploads).
  */
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  async function onSubmit(e: React.FormEvent) {
+  async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
-    setError(null);
+    setError('');
 
     try {
-      const { error: signInError } = await getSupabaseClient().auth.signInWithPassword({
+      const supabase = getSupabaseClient();
+      const { data, error: signInError } = await supabase.auth.signInWithPassword({
         email: email.trim(),
         password,
       });
 
       if (signInError) {
-        setError(signInError.message);
-        setBusy(false);
+        // UN SOLO mensaje para contraseña incorrecta y para dirección
+        // inexistente. Distinguirlos permitiría averiguar quién tiene cuenta
+        // probando direcciones. Por eso no se muestra `signInError.message`:
+        // Supabase a veces sí los distingue, y reenviarlo filtraría eso.
+        setError('Incorrect email or password.');
         return;
       }
 
-      // `refresh()` antes de navegar: el gate corre en el servidor y necesita
-      // ver la cookie nueva, que sin esto todavía no viajó.
-      router.refresh();
+      // Alguien sin acceso a esta app va a /no-access y no a las cargas: el
+      // gate lo rebotaría igual, y así ve el motivo real en vez de una
+      // pantalla que parpadea.
+      if (!hasAppAccess(data.user)) {
+        router.replace(NO_ACCESS_PATH);
+        router.refresh();
+        return;
+      }
+
       router.replace(DEFAULT_LANDING);
+      // refresh() para que el gate vuelva a correr con la cookie ya escrita --
+      // sin esto, la navegación puede resolverse con el árbol de rutas que el
+      // cliente tenía cacheado de cuando no había sesión.
+      router.refresh();
     } catch (err) {
-      // Típicamente falta de configuración: el mensaje del cliente dice cuál.
-      setError(err instanceof Error ? err.message : String(err));
+      // Acá sí se muestra el mensaje real: este catch es para fallas de
+      // configuración o de red, que no revelan nada sobre ninguna cuenta.
+      setError(err instanceof Error ? err.message : 'Could not sign in. Try again.');
+    } finally {
       setBusy(false);
     }
   }
 
   return (
     <main className="auth-screen">
-      <form className="auth-card" onSubmit={onSubmit}>
-        <h1>simo-sync · Cargas de archivos</h1>
-        <p>Entrá con tu cuenta de simoOS.</p>
+      <div className="auth-panel">
+        <Image
+          className="auth-logo"
+          src="/brand/homesi-lockup.png"
+          alt="HOMESÍ — Powered by Supreme Lending"
+          width={320}
+          height={55}
+          priority
+        />
 
-        {error ? <p className="auth-err">{error}</p> : null}
+        <div className="auth-card">
+          <form onSubmit={onSubmit} noValidate>
+            <div className="auth-field">
+              <label htmlFor="email" className="auth-label">
+                Email
+              </label>
+              <input
+                id="email"
+                type="email"
+                autoComplete="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@supremelending.com"
+                className="auth-input"
+                required
+              />
+            </div>
 
-        <label className="field">
-          <span>Email</span>
-          <input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="username"
-            required
-          />
-        </label>
+            <div className="auth-field">
+              <label htmlFor="password" className="auth-label">
+                Password
+              </label>
+              <input
+                id="password"
+                type="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="auth-input"
+                required
+              />
+            </div>
 
-        <label className="field">
-          <span>Contraseña</span>
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="current-password"
-            required
-          />
-        </label>
+            <button type="submit" className="auth-submit" disabled={busy}>
+              {busy ? 'Signing in…' : 'Sign In'}
+            </button>
 
-        <button type="submit" className="primary" disabled={busy}>
-          {busy ? 'Entrando…' : 'Entrar'}
-        </button>
-      </form>
+            {error && (
+              <p role="alert" className="auth-error">
+                {error}
+              </p>
+            )}
+          </form>
+        </div>
+      </div>
     </main>
   );
 }

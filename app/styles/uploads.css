@@ -1,0 +1,281 @@
+/*
+ * ============================================================================
+ * CARGAS DE ARCHIVOS — componentes de la vista /uploads
+ * ============================================================================
+ *
+ * Ocupa el lugar de `components.css` del repo hermano (homesi-reporte-actividad),
+ * que son 1227 líneas de tablas, pivots y modales que esta app no tiene. Acá
+ * está sólo lo que /uploads dibuja de verdad: una tarjeta por fuente, su
+ * control de subida y el historial de cargas.
+ *
+ * Todos los valores salen de tokens.css. Ningún color literal fuera de los
+ * blancos y los rgba() derivados del navy de marca, igual que en shell.css.
+ */
+
+/* ---------------------------------------------------------------------------
+ * 1. Tarjeta de fuente
+ * ------------------------------------------------------------------------ */
+
+.source-card {
+  background: #fff;
+  border: 1px solid var(--slate-200);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xs);
+  padding: 22px 24px;
+}
+
+.source-card + .source-card {
+  margin-top: 16px;
+}
+
+.source-card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.source-card__title {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--navy);
+  margin: 0;
+}
+
+/*
+ * Destino de la carga (dataset.tabla). Monoespaciado a propósito: es un
+ * identificador que se copia y se pega en BigQuery, no prosa.
+ */
+.source-card__target {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--slate-500);
+}
+
+/* ---------------------------------------------------------------------------
+ * 2. Control de subida
+ * ------------------------------------------------------------------------ */
+
+.upload-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+}
+
+/*
+ * El <input type="file"> nativo no se puede estilar de forma consistente entre
+ * navegadores, así que se oculta y la etiqueta hace de botón. `sr-only` en vez
+ * de display:none para que siga siendo alcanzable por teclado y lectores de
+ * pantalla.
+ */
+.upload-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.btn {
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--slate-200);
+  background: #fff;
+  color: var(--slate-600);
+  border-radius: var(--radius-full);
+  padding: 9px 18px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.btn:hover:not(:disabled) {
+  border-color: var(--navy);
+  color: var(--navy);
+}
+
+/* CTA principal: coral de marca, igual que `.auth-submit`. */
+.btn--primary {
+  background: var(--coral);
+  border-color: var(--coral);
+  color: #fff;
+}
+.btn--primary:hover:not(:disabled) {
+  background: #e03535;
+  border-color: #e03535;
+  color: #fff;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.upload-filename {
+  font-size: 12px;
+  color: var(--slate-500);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+
+/* ---- Barra de progreso ---- */
+
+.upload-bar {
+  height: 6px;
+  background: var(--slate-100);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  margin-top: 16px;
+}
+.upload-bar__fill {
+  display: block;
+  height: 100%;
+  background: var(--coral);
+  border-radius: var(--radius-full);
+  transition: width 0.15s linear;
+}
+
+/* ---------------------------------------------------------------------------
+ * 3. Resultado de la carga
+ * ------------------------------------------------------------------------ */
+
+.upload-result {
+  margin-top: 16px;
+  border: 1px solid var(--slate-200);
+  background: var(--slate-50);
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: var(--slate-600);
+  line-height: 1.5;
+}
+.upload-result--ok {
+  border-color: var(--emerald-200);
+  background: var(--emerald-50);
+  color: var(--emerald-800);
+}
+.upload-result--err {
+  border-color: var(--rose-200);
+  background: var(--rose-50);
+  color: var(--rose-700);
+}
+.upload-result strong {
+  font-weight: 700;
+}
+.upload-result ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+/* ---------------------------------------------------------------------------
+ * 4. Historial de cargas
+ * ------------------------------------------------------------------------ */
+
+.loads {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 20px;
+  font-size: 12.5px;
+}
+
+.loads th,
+.loads td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--slate-100);
+  white-space: nowrap;
+}
+
+.loads th {
+  font-family: var(--font-display);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--slate-400);
+  border-bottom-color: var(--slate-200);
+}
+
+.loads tbody tr:hover {
+  background: var(--accent-soft);
+}
+
+.loads td:nth-child(2) {
+  /* El nombre de archivo es lo único que puede ser largo: cede el ancho. */
+  white-space: normal;
+  word-break: break-word;
+  min-width: 0;
+}
+
+.loads__empty {
+  color: var(--slate-400);
+  font-style: normal;
+}
+
+/* Envoltorio con scroll propio: el spec prohíbe scroll horizontal del body. */
+.loads-scroll {
+  overflow-x: auto;
+}
+
+/* ---- Pills de estado ---- */
+
+.pill {
+  display: inline-block;
+  border-radius: var(--radius-full);
+  padding: 3px 10px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+}
+.pill--ok {
+  background: var(--emerald-50);
+  border-color: var(--emerald-200);
+  color: var(--emerald-700);
+}
+.pill--warn {
+  background: var(--amber-50);
+  border-color: var(--amber-200);
+  color: var(--amber-700);
+}
+.pill--err {
+  background: var(--rose-50);
+  border-color: var(--rose-200);
+  color: var(--rose-700);
+}
+
+/* ---------------------------------------------------------------------------
+ * 5. Estado vacío / error de lectura
+ * ------------------------------------------------------------------------ */
+
+.notice {
+  border: 1px dashed var(--slate-300);
+  border-radius: var(--radius-lg);
+  padding: 40px 24px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--slate-500);
+  line-height: 1.6;
+  background: #fff;
+}
+.notice--err {
+  border-style: solid;
+  border-color: var(--rose-200);
+  background: var(--rose-50);
+  color: var(--rose-700);
+}

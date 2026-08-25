@@ -2,6 +2,7 @@
 
 import { useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { UploadIcon, FileSheetIcon } from '@/components/ui/icons';
 
 export type SourceRow = {
   source_key: string;
@@ -27,10 +28,11 @@ type Result =
   | { kind: 'ok'; body: Record<string, unknown> }
   | { kind: 'err'; message: string; detail?: Record<string, unknown> };
 
-const STATUS_LABEL: Record<string, string> = {
-  ok: 'ok',
-  validation_failed: 'validación',
-  error: 'error',
+/** Etiqueta y color de pill por estado. Un solo lugar para las tres variantes. */
+const STATUS_STYLE: Record<string, { label: string; className: string }> = {
+  ok: { label: 'ok', className: 'pill pill--ok' },
+  validation_failed: { label: 'validación', className: 'pill pill--warn' },
+  error: { label: 'error', className: 'pill pill--err' },
 };
 
 function formatDate(iso: string): string {
@@ -46,6 +48,10 @@ export default function UploadCard({ source, recent }: { source: SourceRow; rece
   const [result, setResult] = useState<Result | null>(null);
 
   const busy = progress !== null;
+  // El <input> real está oculto y lo dispara su <label>: el control nativo no
+  // se puede estilar igual entre navegadores. El id tiene que ser único porque
+  // hay una tarjeta por fuente en la misma página.
+  const inputId = `file-${source.source_key}`;
 
   /**
    * Se usa XMLHttpRequest y no fetch a propósito: fetch no expone progreso de
@@ -107,18 +113,20 @@ export default function UploadCard({ source, recent }: { source: SourceRow; rece
   }
 
   return (
-    <section className="card">
-      <div className="card-head">
-        <h2>{source.display_name}</h2>
-        <span className="target">
+    <section className="source-card">
+      <div className="source-card__head">
+        <h2 className="source-card__title">{source.display_name}</h2>
+        <span className="source-card__target">
           {source.target_dataset}.{source.target_table}
           {source.sheet_name ? ` · hoja "${source.sheet_name}"` : ''}
         </span>
       </div>
 
-      <div className="row">
+      <div className="upload-row">
         <input
           ref={inputRef}
+          id={inputId}
+          className="upload-file"
           type="file"
           accept=".xlsx,.csv"
           disabled={busy}
@@ -127,32 +135,48 @@ export default function UploadCard({ source, recent }: { source: SourceRow; rece
             setResult(null);
           }}
         />
-        <button className="primary" onClick={upload} disabled={!file || busy}>
+        <label htmlFor={inputId} className="btn">
+          <FileSheetIcon size={14} />
+          Elegir archivo
+        </label>
+
+        <button type="button" className="btn btn--primary" onClick={upload} disabled={!file || busy}>
+          <UploadIcon size={14} />
           {busy ? 'Subiendo…' : 'Subir'}
         </button>
-        {file ? <span className="filename">{file.name}</span> : null}
+
+        {file ? <span className="upload-filename">{file.name}</span> : null}
       </div>
 
       {progress !== null ? (
-        <div className="bar" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>
-          <i style={{ width: `${progress}%` }} />
+        <div
+          className="upload-bar"
+          role="progressbar"
+          aria-valuenow={progress}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          <i className="upload-bar__fill" style={{ width: `${progress}%` }} />
         </div>
       ) : null}
 
       {progress === 100 ? (
-        <div className="result">Archivo subido. Validando y cargando a BigQuery…</div>
+        <div className="upload-result">Archivo subido. Validando y cargando a BigQuery…</div>
       ) : null}
 
       {result?.kind === 'ok' ? (
-        <div className="result ok">
+        <div className="upload-result upload-result--ok">
           Cargadas <strong>{String(result.body.filas_en_tabla)}</strong> filas en{' '}
           {String(result.body.destino)} ({String(result.body.columnas)} columnas
-          {result.body.filas_descartadas ? `, ${String(result.body.filas_descartadas)} filas descartadas` : ''}).
+          {result.body.filas_descartadas
+            ? `, ${String(result.body.filas_descartadas)} filas descartadas`
+            : ''}
+          ).
         </div>
       ) : null}
 
       {result?.kind === 'err' ? (
-        <div className="result err">
+        <div className="upload-result upload-result--err">
           {result.message}
           {result.detail ? (
             <ul>
@@ -166,38 +190,44 @@ export default function UploadCard({ source, recent }: { source: SourceRow; rece
         </div>
       ) : null}
 
-      <table className="loads">
-        <thead>
-          <tr>
-            <th>Fecha</th>
-            <th>Archivo</th>
-            <th>Filas</th>
-            <th>Estado</th>
-          </tr>
-        </thead>
-        <tbody>
-          {recent.length === 0 ? (
+      <div className="loads-scroll">
+        <table className="loads">
+          <thead>
             <tr>
-              <td colSpan={4} style={{ color: 'var(--muted)' }}>
-                Sin cargas todavía.
-              </td>
+              <th>Fecha</th>
+              <th>Archivo</th>
+              <th>Filas</th>
+              <th>Estado</th>
             </tr>
-          ) : (
-            recent.map((entry) => (
-              <tr key={entry.id}>
-                <td>{formatDate(entry.uploaded_at)}</td>
-                <td title={entry.error_message ?? undefined}>{entry.file_name ?? '—'}</td>
-                <td>{entry.rows_loaded ?? '—'}</td>
-                <td>
-                  <span className={`pill ${entry.status}`}>
-                    {STATUS_LABEL[entry.status] ?? entry.status}
-                  </span>
+          </thead>
+          <tbody>
+            {recent.length === 0 ? (
+              <tr>
+                <td colSpan={4} className="loads__empty">
+                  Sin cargas todavía.
                 </td>
               </tr>
-            ))
-          )}
-        </tbody>
-      </table>
+            ) : (
+              recent.map((entry) => {
+                const style = STATUS_STYLE[entry.status] ?? {
+                  label: entry.status,
+                  className: 'pill',
+                };
+                return (
+                  <tr key={entry.id}>
+                    <td>{formatDate(entry.uploaded_at)}</td>
+                    <td title={entry.error_message ?? undefined}>{entry.file_name ?? '—'}</td>
+                    <td>{entry.rows_loaded ?? '—'}</td>
+                    <td>
+                      <span className={style.className}>{style.label}</span>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }

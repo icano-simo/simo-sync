@@ -1,7 +1,5 @@
 import { getServerClient } from '@/lib/supabase/server';
-import { getSessionUser } from '@/lib/auth/session';
 import UploadCard, { type LoadEntry, type SourceRow } from './UploadCard';
-import '@/app/styles/app.css';
 
 /**
  * Pantalla de cargas.
@@ -13,11 +11,13 @@ import '@/app/styles/app.css';
  *
  * Ojo: esto es presentación. La autorización que importa está en
  * `/api/upload/[source]`, que vuelve a verificar la asignación.
+ *
+ * El email de la sesión ya no se muestra acá: vive en el header del shell
+ * (`components/layout/UserMenu.tsx`), igual que en el resto del portal.
  */
 export const dynamic = 'force-dynamic';
 
 export default async function UploadsPage() {
-  const user = await getSessionUser();
   const sb = await getServerClient('uploads');
 
   // El join trae sólo las fuentes asignadas: `user_source` está acotada por RLS
@@ -48,19 +48,20 @@ export default async function UploadsPage() {
   }
 
   return (
-    <main className="shell">
-      <div className="topbar">
-        <h1>Cargas de archivos</h1>
-        {user?.email ? <span className="who">{user.email}</span> : null}
+    <div className="hub-container">
+      <div className="page-head">
+        <div>
+          <h1 className="page-head__title">Data Uploads</h1>
+          <p className="page-head__subtitle">
+            Subí acá los archivos de fuentes externas. Sólo ves las fuentes que tenés asignadas.
+          </p>
+        </div>
       </div>
-      <p className="lede">
-        Subí acá los archivos de fuentes externas. Sólo ves las fuentes que tenés asignadas.
-      </p>
 
       {error ? (
-        <div className="result err">No se pudieron leer las fuentes: {error.message}</div>
+        <div className="notice notice--err">No se pudieron leer las fuentes: {error.message}</div>
       ) : sources.length === 0 ? (
-        <div className="empty">
+        <div className="notice">
           No tenés ninguna fuente asignada todavía.
           <br />
           Pedile al administrador de simoOS que te asigne una.
@@ -74,6 +75,6 @@ export default async function UploadsPage() {
           />
         ))
       )}
-    </main>
+    </div>
   );
 }

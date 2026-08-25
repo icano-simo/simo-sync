@@ -1,0 +1,13 @@
+/*
+ * Orden de import intencional: tokens -> reset -> shell -> componentes.
+ * Es el mismo de homesi-reporte-actividad, para que las dos apps carguen la
+ * marca en el mismo orden y una regla de shell nunca gane sobre un token.
+ *
+ * `components.css` de esa app (1227 líneas de tablas, pivots y modales) NO se
+ * copia: esta app tiene una sola vista. `uploads.css` es su reemplazo mínimo,
+ * escrito con los mismos tokens.
+ */
+@import './styles/tokens.css';
+@import './styles/base.css';
+@import './styles/shell.css';
+@import './styles/uploads.css';

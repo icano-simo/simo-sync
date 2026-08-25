@@ -1,13 +1,17 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { getSupabaseClient } from '@/lib/supabase/client';
 import { LOGIN_PATH } from '@/lib/auth/routes';
-import '@/app/styles/app.css';
+import { AlertTriangleIcon } from '@/components/ui/icons';
+import '@/app/styles/auth.css';
 
 /**
- * SIN ACCESO — sesión válida, pero sin `data_uploads` en allowed_apps.
+ * ============================================================================
+ * SIN ACCESO — sesión válida, pero sin permiso sobre esta app
+ * ============================================================================
  *
  * Página propia en vez de un redirect de vuelta a /login: los dos estados NO
  * son el mismo. El gate saca de /login a cualquiera con sesión válida, así que
@@ -19,6 +23,9 @@ import '@/app/styles/app.css';
  * proyecto de Supabase), así que cerrarla acá también sacaría a la persona de
  * ésas. El botón existe, pero es una decisión suya y no un efecto secundario de
  * haber entrado a la app equivocada.
+ *
+ * Markup y estilo portados de homesi-reporte-actividad; cambia sólo el nombre
+ * del módulo en el título.
  */
 export default function NoAccessPage() {
   const router = useRouter();
@@ -49,19 +56,39 @@ export default function NoAccessPage() {
 
   return (
     <main className="auth-screen">
-      <div className="auth-card">
-        <h1>No tenés acceso a Cargas de archivos</h1>
-        <p>
-          Tu sesión es válida{email ? ` (${email})` : ''}, pero esta cuenta no está autorizada para
-          abrir este módulo.
-        </p>
-        <p>
-          Pedile acceso al administrador de simoOS. Tu sesión sigue activa para las demás
-          aplicaciones del portal.
-        </p>
-        <button onClick={signOut} disabled={busy}>
-          {busy ? 'Cerrando sesión…' : 'Cerrar sesión'}
-        </button>
+      <div className="auth-panel">
+        <Image
+          className="auth-logo"
+          src="/brand/homesi-lockup.png"
+          alt="HOMESÍ — Powered by Supreme Lending"
+          width={320}
+          height={55}
+          priority
+        />
+
+        <div className="auth-card">
+          <div className="auth-icon">
+            <span>
+              <AlertTriangleIcon size={22} />
+            </span>
+          </div>
+
+          <h1 className="auth-title">You don&apos;t have access to Data Uploads</h1>
+
+          <p className="auth-text">
+            Your session is valid{email ? ` (${email})` : ''}, but this account is not authorized to
+            open this module.
+          </p>
+
+          <p className="auth-note">
+            Ask the Homesí administrator for access. Your session stays active for the other portal
+            applications.
+          </p>
+
+          <button onClick={signOut} disabled={busy} className="auth-secondary">
+            {busy ? 'Signing out…' : 'Sign out'}
+          </button>
+        </div>
       </div>
     </main>
   );
