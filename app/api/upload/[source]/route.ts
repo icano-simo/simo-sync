@@ -23,8 +23,8 @@ import { getSessionUser } from '@/lib/auth/session';
 import { hasAppAccess } from '@/lib/auth/appAccess';
 import { getServerClient } from '@/lib/supabase/server';
 import { getBigQueryWriterClient, assertWritableDataset } from '@/lib/bigquery-writer';
-import { getSourceRules, type SourceRules } from '@/lib/uploads/sources';
-import { parseXlsx, parseCsv, type ParsedFile } from '@/lib/uploads/parse';
+import { getSourceRules, hasSourceRules, type SourceRules } from '@/lib/uploads/sources';
+import { parseXlsx, parseCsv, dropColumns, type ParsedFile } from '@/lib/uploads/parse';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -40,6 +40,12 @@ type SourceConfig = {
   min_rows_expected: number;
   sheet_name: string | null;
   is_active: boolean;
+  /** Fila del encabezado, 1-based. null = la 1. */
+  header_row: number | null;
+  /** Obligatorias, con el nombre CRUDO del archivo. Sin esto la carga se niega. */
+  required_columns: string[] | null;
+  /** A descartar antes de escribir, con el nombre YA NORMALIZADO. */
+  drop_columns: string[] | null;
 };
 
 type LogStatus = 'ok' | 'validation_failed' | 'error';
@@ -140,12 +146,42 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
     );
   }
 
-  let rules: SourceRules;
-  try {
-    rules = getSourceRules(sourceKey);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return Response.json({ ok: false, error: message }, { status: 500 });
+  const rules: SourceRules = getSourceRules(sourceKey);
+
+  /*
+   * Las columnas obligatorias ahora viven en `uploads.source`, así que una fila
+   * sin ellas dejaría la validación en nada -- y la carga es WRITE_TRUNCATE:
+   * un archivo equivocado no dejaría datos parciales, borraría los buenos. Se
+   * niega antes de recibir el archivo, para no hacer subir varios MB y recién
+   * después decir que la fuente está mal configurada.
+   *
+   * Una fuente que de verdad no tenga columnas obligatorias no está
+   * contemplada: hoy eso es siempre una fila a medio configurar.
+   */
+  const requiredColumns = sourceRow.required_columns ?? [];
+  if (requiredColumns.length === 0) {
+    return Response.json(
+      {
+        ok: false,
+        stage: 'config',
+        error:
+          `source "${sourceKey}" has no required_columns in uploads.source; ` +
+          'refusing to load without column validation',
+      },
+      { status: 500 },
+    );
+  }
+
+  const headerRow = sourceRow.header_row ?? 1;
+  if (!Number.isInteger(headerRow) || headerRow < 1) {
+    return Response.json(
+      {
+        ok: false,
+        stage: 'config',
+        error: `source "${sourceKey}" has an invalid header_row (${sourceRow.header_row})`,
+      },
+      { status: 500 },
+    );
   }
 
   // ---- 3. Recibir el archivo -------------------------------------------
@@ -173,10 +209,12 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
     }
 
     // ---- 4. Parsear según la configuración -----------------------------
+    const parseOptions = { headerRow, requireNonEmpty: rules.requireNonEmpty };
+
     if (isXlsx) {
-      parsed = await parseXlsx(await file.arrayBuffer(), sourceRow.sheet_name, rules.requireNonEmpty);
+      parsed = await parseXlsx(await file.arrayBuffer(), sourceRow.sheet_name, parseOptions);
     } else {
-      parsed = parseCsv(await file.text(), rules.requireNonEmpty);
+      parsed = parseCsv(await file.text(), parseOptions);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -200,8 +238,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
     );
   }
 
+  // Se compara contra el nombre CRUDO -- `required_columns` describe el archivo
+  // que llegó, no la tabla que se va a crear. `drop_columns` es al revés.
   const present = new Set(parsed.rawHeaders.map((h) => h.trim().toLowerCase()));
-  const missing = rules.requiredColumns.filter((c) => !present.has(c.trim().toLowerCase()));
+  const missing = requiredColumns.filter((c) => !present.has(c.trim().toLowerCase()));
   if (missing.length) {
     problems.push(`missing expected column(s): ${missing.join(', ')}`);
   }
@@ -233,6 +273,52 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
       { status: 422 },
     );
   }
+
+  // ---- 5b. Descartar columnas que no deben llegar a BigQuery -----------
+  /*
+   * Después de validar (la validación mira el archivo completo) y antes de
+   * escribir. Lo que se descarta acá no viaja en el NDJSON ni aparece en el
+   * esquema: no existe en la tabla, ni siquiera como columna vacía.
+   */
+  const drop = dropColumns(parsed, sourceRow.drop_columns ?? []);
+
+  /*
+   * Un nombre de `drop_columns` que no está en el archivo se trata como error y
+   * NO como un aviso. Las dos causas posibles piden que alguien mire antes de
+   * escribir: o la config tiene un typo -- y entonces la columna que se quería
+   * dejar afuera se cargaría igual -- o el archivo cambió de forma. Con datos
+   * sensibles, cargar primero y descubrirlo después es el orden equivocado, y
+   * como la carga es WRITE_TRUNCATE, reintentar después de corregir no cuesta
+   * nada.
+   */
+  if (drop.notFound.length) {
+    const message =
+      `drop_columns not present in the file: ${drop.notFound.join(', ')}; ` +
+      'fix uploads.source or check whether the source file changed shape';
+    await writeLog(sb, {
+      source_key: sourceKey,
+      user_email: userEmail,
+      file_name: fileName,
+      rows_loaded: null,
+      status: 'validation_failed',
+      error_message: message,
+    });
+    return Response.json(
+      {
+        ok: false,
+        stage: 'drop_columns',
+        error: message,
+        detalle: {
+          columnas_del_archivo: parsed.headers.length,
+          descartadas_encontradas: drop.dropped,
+          descartadas_no_encontradas: drop.notFound,
+        },
+      },
+      { status: 422 },
+    );
+  }
+
+  const toLoad = drop.parsed;
 
   // ---- 6-8. Cargar, verificar, registrar -------------------------------
   try {
@@ -270,7 +356,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
     const fq = `\`${bq.projectId}.${sourceRow.target_dataset}.${sourceRow.target_table}\``;
     const [countRows] = await bq.query({ query: `SELECT COUNT(*) AS n FROM ${fq}` });
     const rowsInTable = Number(countRows?.[0]?.n ?? 0);
-    const matches = rowsInTable === parsed.rows.length;
+    // El descarte quita COLUMNAS, nunca filas: el conteo esperado sigue siendo
+    // el del archivo parseado.
+    const matches = rowsInTable === toLoad.rows.length;
 
     await writeLog(sb, {
       source_key: sourceKey,
@@ -280,7 +368,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
       status: matches ? 'ok' : 'error',
       error_message: matches
         ? null
-        : `row count mismatch: parsed ${parsed.rows.length}, table has ${rowsInTable}`,
+        : `row count mismatch: parsed ${toLoad.rows.length}, table has ${rowsInTable}`,
     });
 
     return Response.json(
@@ -289,11 +377,15 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
         fuente: sourceRow.display_name,
         archivo: fileName,
         destino: `${sourceRow.target_dataset}.${sourceRow.target_table}`,
-        filas_parseadas: parsed.rows.length,
+        filas_parseadas: toLoad.rows.length,
         filas_en_tabla: rowsInTable,
         filas_descartadas: parsed.discardedRows,
-        columnas: parsed.headers.length,
+        columnas_del_archivo: parsed.headers.length,
+        columnas_cargadas: toLoad.headers.length,
+        columnas_descartadas: drop.dropped,
         columnas_esperadas: rules.expectedColumnCount ?? null,
+        fila_encabezado: headerRow,
+        reglas_en_codigo: hasSourceRules(sourceKey),
         coincide: matches,
         duracion_ms: Date.now() - started,
       },

@@ -5,17 +5,28 @@
  * exactamente los que la carga va a crear en BigQuery, porque este script
  * importa la MISMA `normalizeHeaders` que usa la ruta de carga.
  *
- *   node scripts/dump-headers.ts <archivo.xlsx> [nombre-de-hoja]
+ *   node scripts/dump-headers.ts <archivo.xlsx> [nombre-de-hoja] [fila-encabezado]
+ *
+ * La fila del encabezado es 1-based y por defecto la 1. Va como parámetro
+ * porque no todas las fuentes la traen ahí: el roster de USA tiene "Search:" en
+ * la 1 y los encabezados reales en la 2, que es lo que configura `header_row`
+ * en `uploads.source`.
  *
  * Requiere Node 22.6+ (ejecuta .ts directamente, sin compilar).
  */
 import ExcelJS from 'exceljs';
 import { normalizeHeaders } from '../lib/uploads/sources.ts';
 
-const [filePath, sheetName = 'Data'] = process.argv.slice(2);
+const [filePath, sheetName = 'Data', headerRowArg = '1'] = process.argv.slice(2);
 
 if (!filePath) {
-  console.error('uso: node scripts/dump-headers.ts <archivo.xlsx> [nombre-de-hoja]');
+  console.error('uso: node scripts/dump-headers.ts <archivo.xlsx> [nombre-de-hoja] [fila-encabezado]');
+  process.exit(1);
+}
+
+const headerRow = Number(headerRowArg);
+if (!Number.isInteger(headerRow) || headerRow < 1) {
+  console.error(`fila-encabezado invalida: ${headerRowArg}`);
   process.exit(1);
 }
 
@@ -30,10 +41,10 @@ if (!sheet) {
   process.exit(1);
 }
 
-// Mismo criterio que parseXlsx: encabezado en la fila 1, se recortan los
+// Mismo criterio que parseXlsx: encabezado en `headerRow`, se recortan los
 // vacíos de la derecha.
 const raw: string[] = [];
-sheet.getRow(1).eachCell({ includeEmpty: true }, (cell) => {
+sheet.getRow(headerRow).eachCell({ includeEmpty: true }, (cell) => {
   const v = cell.value;
   raw.push(String(v ?? '').trim());
 });

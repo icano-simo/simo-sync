@@ -25,11 +25,20 @@ create table if not exists uploads.source (
     load_mode         text    not null,           -- 'replace'
     min_rows_expected int     not null,           -- salvaguarda: aborta si el archivo viene corto
     sheet_name        text,                       -- 'Data' para Encompass; null para csv
-    is_active         boolean not null default true
+    is_active         boolean not null default true,
+    header_row        int     not null default 1,  -- el roster de USA lo trae en la 2
+    required_columns  text[]  not null default '{}',  -- nombres CRUDOS del archivo
+    drop_columns      text[]  not null default '{}'   -- nombres YA NORMALIZADOS
 );
 
 comment on table uploads.source is
-    'Configuración por fuente. Las reglas de parseo que requieren código viven en lib/uploads/sources.ts.';
+    'Configuración por fuente. Una fuente nueva se da de alta acá sin desplegar código; lib/uploads/sources.ts sólo tiene lo que no se puede expresar como configuración.';
+comment on column uploads.source.header_row is
+    'Fila del encabezado, 1-based. El roster de USA trae "Search:" en la 1 y los encabezados en la 2.';
+comment on column uploads.source.required_columns is
+    'Columnas que deben estar en el archivo, con el nombre CRUDO tal como viene. Vacío = la ruta se niega a cargar: sin validación, un archivo equivocado borraría los datos buenos con WRITE_TRUNCATE.';
+comment on column uploads.source.drop_columns is
+    'Columnas que NO deben llegar a BigQuery, con el nombre YA NORMALIZADO (numero_de_cedula, no "Número de Cédula"). Se descartan después de validar y antes de escribir. Un nombre que no exista en el archivo aborta la carga: o hay un typo y el dato sensible se cargaría igual, o el archivo cambió de forma.';
 comment on column uploads.source.min_rows_expected is
     'Si el archivo trae menos filas que esto, la carga se aborta sin tocar BigQuery.';
 
@@ -159,13 +168,40 @@ create policy load_log_insert_own
 -- ============================================================================
 insert into uploads.source (
     source_key, display_name, target_dataset, target_table,
-    load_mode, min_rows_expected, sheet_name, is_active
+    load_mode, min_rows_expected, sheet_name, is_active,
+    header_row, required_columns, drop_columns
 )
 values (
     'encompass', 'Encompass', 'lending_marts', 'encompass_loans_stage',
-    'replace', 4000, 'Data', true
+    'replace', 4000, 'Data', true,
+    1,
+    -- Las cinco que identifican al export y a la hoja correcta. No es la lista
+    -- de las 58: es el conjunto mínimo que un archivo equivocado -- u otra hoja
+    -- del mismo archivo -- no puede tener por casualidad.
+    array[
+        'Loan Number',
+        'Loan Officer',
+        'LOAN INFO CHANNEL',
+        'LAST FINISHED MILESTONE',
+        'HELOC LIEN POSITION'
+    ],
+    '{}'
 )
 on conflict (source_key) do nothing;
+
+-- OJO -- `on conflict do nothing` NO actualiza la fila que ya existe. Si la
+-- fuente 'encompass' ya está cargada (lo está, en producción), estas tres
+-- columnas hay que ponérselas a mano; sin `required_columns` la ruta se niega
+-- a cargar:
+--
+-- update uploads.source set
+--     header_row       = 1,
+--     required_columns = array[
+--         'Loan Number', 'Loan Officer', 'LOAN INFO CHANNEL',
+--         'LAST FINISHED MILESTONE', 'HELOC LIEN POSITION'
+--     ],
+--     drop_columns     = '{}'
+-- where source_key = 'encompass';
 
 -- Asignar la fuente a quien la vaya a cargar. Sin una fila acá, la persona entra
 -- a la app y no ve ninguna fuente -- que es el comportamiento correcto.

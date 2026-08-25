@@ -10,6 +10,20 @@ import ExcelJS from 'exceljs';
 import Papa from 'papaparse';
 import { normalizeHeaders } from './sources';
 
+/** Opciones de parseo que salen de la configuración de la fuente. */
+export type ParseOptions = {
+  /**
+   * Fila del encabezado, 1-based. Por defecto la 1.
+   *
+   * El roster de USA trae el encabezado en la 2: la fila 1 dice "Search:". Con
+   * la 1 el parser tomaría esa celda como el único encabezado y produciría una
+   * tabla de una sola columna, sin fallar.
+   */
+  headerRow?: number;
+  /** Ver `SourceRules.requireNonEmpty`. */
+  requireNonEmpty?: string;
+};
+
 export type ParsedFile = {
   /** Encabezados crudos, tal como venían en el archivo. */
   rawHeaders: string[];
@@ -112,8 +126,9 @@ function buildRows(
 export async function parseXlsx(
   buffer: ArrayBuffer,
   sheetName: string | null,
-  requireNonEmpty?: string,
+  options: ParseOptions = {},
 ): Promise<ParsedFile> {
+  const { headerRow = 1, requireNonEmpty } = options;
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
 
@@ -124,10 +139,8 @@ export async function parseXlsx(
     throw new Error(`sheet "${sheetName}" not found in workbook; available: ${available}`);
   }
 
-  // Encabezado en la primera fila.
-  const headerRow = sheet.getRow(1);
   const rawHeaders: string[] = [];
-  headerRow.eachCell({ includeEmpty: true }, (cell) => {
+  sheet.getRow(headerRow).eachCell({ includeEmpty: true }, (cell) => {
     rawHeaders.push((cellToText(cell.value) ?? '').trim());
   });
 
@@ -135,12 +148,14 @@ export async function parseXlsx(
   while (rawHeaders.length && rawHeaders[rawHeaders.length - 1] === '') rawHeaders.pop();
 
   if (rawHeaders.length === 0) {
-    throw new Error(`sheet "${sheet.name}" has no header row`);
+    throw new Error(`sheet "${sheet.name}" has no header on row ${headerRow}`);
   }
 
   const matrix: (string | null)[][] = [];
   sheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-    if (rowNumber === 1) return; // el encabezado
+    // Se saltea el encabezado Y todo lo que esté por encima: con header_row=2,
+    // la fila 1 ('Search:') no es un dato.
+    if (rowNumber <= headerRow) return;
     const values: (string | null)[] = [];
     for (let i = 1; i <= rawHeaders.length; i++) {
       values.push(cellToText(row.getCell(i).value));
@@ -152,7 +167,9 @@ export async function parseXlsx(
 }
 
 /** Lee un .csv. Papa Parse maneja comillas y saltos de línea dentro de campo. */
-export function parseCsv(text: string, requireNonEmpty?: string): ParsedFile {
+export function parseCsv(text: string, options: ParseOptions = {}): ParsedFile {
+  const { headerRow = 1, requireNonEmpty } = options;
+
   const result = Papa.parse<string[]>(text, {
     header: false,
     skipEmptyLines: 'greedy',
@@ -161,12 +178,24 @@ export function parseCsv(text: string, requireNonEmpty?: string): ParsedFile {
   const data = result.data.filter((r) => Array.isArray(r));
   if (data.length === 0) throw new Error('csv is empty');
 
-  const rawHeaders = (data[0] as string[]).map((h) => (h ?? '').trim());
+  /*
+   * `skipEmptyLines: 'greedy'` ya sacó las líneas en blanco, así que el índice
+   * de acá cuenta filas con contenido y no líneas del archivo. Para un
+   * header_row > 1 sobre un CSV con líneas vacías arriba, las dos numeraciones
+   * dejan de coincidir. Hoy ninguna fuente CSV usa header_row > 1; cuando
+   * aparezca una, se lee sin 'greedy' y se filtra después.
+   */
+  const headerIndex = headerRow - 1;
+  if (data.length <= headerIndex) {
+    throw new Error(`csv has no header on row ${headerRow}`);
+  }
+
+  const rawHeaders = (data[headerIndex] as string[]).map((h) => (h ?? '').trim());
   while (rawHeaders.length && rawHeaders[rawHeaders.length - 1] === '') rawHeaders.pop();
 
-  if (rawHeaders.length === 0) throw new Error('csv has no header row');
+  if (rawHeaders.length === 0) throw new Error(`csv has no header on row ${headerRow}`);
 
-  const matrix = data.slice(1).map((values) => {
+  const matrix = data.slice(headerIndex + 1).map((values) => {
     const out: (string | null)[] = [];
     for (let i = 0; i < rawHeaders.length; i++) {
       const v = (values as string[])[i];
@@ -176,4 +205,66 @@ export function parseCsv(text: string, requireNonEmpty?: string): ParsedFile {
   });
 
   return buildRows(rawHeaders, matrix, requireNonEmpty);
+}
+
+/** Resultado de descartar columnas: qué se fue y qué se pidió descartar y no estaba. */
+export type DropResult = {
+  parsed: ParsedFile;
+  /** Nombres normalizados efectivamente quitados. */
+  dropped: string[];
+  /** Nombres de `drop_columns` que no existen en el archivo. */
+  notFound: string[];
+};
+
+/**
+ * Quita columnas del archivo ya parseado, ANTES de escribir a BigQuery.
+ *
+ * Es lo que mantiene los campos sensibles del roster de Colombia (cédula,
+ * cuenta bancaria, dirección, contactos de emergencia, seguridad social) fuera
+ * de BigQuery: no viajan en el NDJSON y tampoco aparecen en el esquema, así que
+ * no existen en la tabla ni como columna vacía.
+ *
+ * OJO CON EL NAMESPACE -- `drop_columns` usa los nombres YA NORMALIZADOS
+ * ('numero_de_cedula'), mientras que `required_columns` usa los nombres CRUDOS
+ * tal como vienen en el archivo ('Número de Cédula'). Son dos listas en la
+ * misma tabla que se comparan contra cosas distintas, a propósito: descartar
+ * apunta a la columna que se va a crear en BigQuery, validar apunta al archivo
+ * que llegó.
+ *
+ * Se descarta DESPUÉS de validar para que la validación vea el archivo completo:
+ * el conteo de columnas esperado y las obligatorias hablan del archivo de
+ * origen, no de lo que termina cargándose.
+ */
+export function dropColumns(parsed: ParsedFile, drop: string[]): DropResult {
+  if (drop.length === 0) return { parsed, dropped: [], notFound: [] };
+
+  const wanted = new Set(drop.map((c) => c.trim().toLowerCase()).filter(Boolean));
+  const keepIndexes: number[] = [];
+  const dropped: string[] = [];
+
+  parsed.headers.forEach((header, i) => {
+    if (wanted.has(header.toLowerCase())) dropped.push(header);
+    else keepIndexes.push(i);
+  });
+
+  const droppedLower = new Set(dropped.map((d) => d.toLowerCase()));
+  const notFound = [...wanted].filter((w) => !droppedLower.has(w));
+
+  const headers = keepIndexes.map((i) => parsed.headers[i]);
+  const rawHeaders = keepIndexes.map((i) => parsed.rawHeaders[i]);
+
+  // Se reconstruye cada fila con las claves que quedan en vez de borrar las
+  // otras: `delete` sobre el objeto original dejaría la fila con la forma vieja
+  // si alguien conserva una referencia previa.
+  const rows = parsed.rows.map((row) => {
+    const out: Record<string, string | null> = {};
+    for (const header of headers) out[header] = row[header] ?? null;
+    return out;
+  });
+
+  return {
+    parsed: { rawHeaders, headers, rows, discardedRows: parsed.discardedRows },
+    dropped,
+    notFound,
+  };
 }

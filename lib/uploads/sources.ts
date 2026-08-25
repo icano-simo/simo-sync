@@ -1,23 +1,23 @@
 /**
  * Reglas de parseo POR FUENTE.
  *
- * La configuración operativa (dataset y tabla destino, modo de carga, filas
- * mínimas, hoja) vive en `uploads.source` en Supabase, para que se pueda
- * cambiar sin desplegar. Lo que vive acá es lo que NO es configuración: las
- * particularidades de cada archivo, que requieren código.
+ * La configuración operativa vive en `uploads.source` en Supabase, para que se
+ * pueda cambiar sin desplegar: dataset y tabla destino, modo de carga, filas
+ * mínimas, hoja, fila del encabezado (`header_row`), columnas obligatorias
+ * (`required_columns`) y columnas a descartar (`drop_columns`).
  *
- * Una fuente nueva necesita las dos cosas: su fila en `uploads.source` y su
- * entrada acá. Es a propósito -- un archivo de origen nuevo siempre trae sus
- * propias rarezas, y descubrirlas es parte de agregarlo.
+ * `required_columns` vivía acá y se movió a la tabla. Lo que queda es lo que no
+ * se puede expresar como una lista en una fila: comportamiento que necesita
+ * código.
+ *
+ * Una fuente puede existir SÓLO con su fila en `uploads.source`, sin entrada
+ * acá: `getSourceRules` devuelve reglas vacías. Es lo que permite dar de alta
+ * una fuente nueva sin desplegar. Cuando aparezca una rareza que la
+ * configuración no cubra -- una columna guardia, un conteo esperado -- se le
+ * agrega su entrada.
  */
 
 export type SourceRules = {
-  /**
-   * Columnas que TIENEN que estar presentes en el encabezado, con el nombre
-   * crudo tal como viene en el archivo (antes de normalizar). Si falta alguna,
-   * la carga se aborta sin tocar BigQuery.
-   */
-  requiredColumns: string[];
   /**
    * Columna que no puede venir vacía. Las filas donde esté vacía se descartan
    * ANTES de contar, porque son basura de la conversión, no datos.
@@ -33,35 +33,30 @@ export type SourceRules = {
 
 export const SOURCE_RULES: Record<string, SourceRules> = {
   encompass: {
-    /*
-     * Las cinco columnas que identifican al export de Encompass y a la hoja
-     * correcta dentro del archivo. No es la lista de las 58: es el conjunto
-     * mínimo que un archivo equivocado -- u otra hoja del mismo archivo -- no
-     * puede tener por casualidad. Que falte una columna del medio no se atrapa
-     * acá a propósito; eso lo reporta expectedColumnCount sin frenar la carga.
-     */
-    requiredColumns: [
-      'Loan Number',
-      'Loan Officer',
-      'LOAN INFO CHANNEL',
-      'LAST FINISHED MILESTONE',
-      'HELOC LIEN POSITION',
-    ],
     // La conversión genera filas vacías al final: sin Loan Number no es un préstamo.
     requireNonEmpty: 'Loan Number',
     expectedColumnCount: 58,
   },
 };
 
+/** Reglas de una fuente que no necesita nada especial del código. */
+const NO_RULES: SourceRules = {};
+
+/**
+ * Reglas de código de una fuente, o vacías si no tiene.
+ *
+ * NO lanza cuando la fuente no está acá: eso bloquearía dar de alta una fuente
+ * nueva sólo con su fila en `uploads.source`, que es justamente lo que
+ * `required_columns` / `drop_columns` / `header_row` vinieron a habilitar. La
+ * ruta reporta `reglas_en_codigo` para que quede visible cuál es el caso.
+ */
 export function getSourceRules(sourceKey: string): SourceRules {
-  const rules = SOURCE_RULES[sourceKey];
-  if (!rules) {
-    throw new Error(
-      `source "${sourceKey}" has no parse rules in lib/uploads/sources.ts; ` +
-        'add them before enabling it in uploads.source',
-    );
-  }
-  return rules;
+  return SOURCE_RULES[sourceKey] ?? NO_RULES;
+}
+
+/** true si la fuente tiene una entrada propia acá. Sólo para reportarlo. */
+export function hasSourceRules(sourceKey: string): boolean {
+  return sourceKey in SOURCE_RULES;
 }
 
 /**
@@ -76,10 +71,26 @@ export function getSourceRules(sourceKey: string): SourceRules {
  *
  *   'EST CLOSING DATE [763]' -> 'est_closing_date_763'
  *   'Loan Number'            -> 'loan_number'
+ *   'Número de Cédula'       -> 'numero_de_cedula'
+ *
+ * LOS ACENTOS SE PLIEGAN A SU LETRA BASE, no se tratan como separador. Sin eso,
+ * 'Número de Cédula' daba 'n_mero_de_c_dula': la 'ú' y la 'é' no están en a-z y
+ * caían en la regla de "todo lo demás es separador". Además de ilegible, es
+ * inconfigurable -- nadie escribe 'n_mero_de_c_dula' en `drop_columns` de
+ * `uploads.source`, escribe 'numero_de_cedula', no coincide, y una columna
+ * sensible del roster de Colombia se quedaría sin descartar. Y dos encabezados
+ * distintos ('Año' y 'A o') colapsaban al mismo nombre por la misma razón.
+ *
+ * Verificado contra el archivo real de Encompass: sus 58 encabezados son todos
+ * ASCII, así que este cambio NO mueve ningún nombre de `encompass_loans_stage`
+ * ni de las vistas de `lending_marts` que ya la leen.
  */
 export function normalizeColumnName(raw: string): string {
   let name = raw
     .trim()
+    // NFD separa la letra de su diacrítico, y el rango los borra: 'é' -> 'e'.
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     // Todo lo que no sea letra o dígito pasa a ser separador.
     .replace(/[^a-z0-9]+/g, '_')
