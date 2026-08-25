@@ -231,20 +231,43 @@ on conflict (source_key) do nothing;
 -- por upload_batch_id: todas las filas de un lote comparten uploaded_at, asi
 -- que si dos cargas cayeran en el mismo instante el orden quedaria indefinido.
 --
--- Los valores reales de target_table y required_columns salen del archivo, que
--- todavia no se vio. Queda inactiva hasta entonces: is_active = false.
+-- Queda INACTIVA (is_active = false) hasta que se decida activarla: mientras
+-- este en false, la ruta responde 404 y la fuente no aparece en la app.
+insert into uploads.source (
+    source_key, display_name, target_dataset, target_table,
+    load_mode, min_rows_expected, sheet_name, is_active,
+    header_row, required_columns, drop_columns
+)
+values (
+    'blast', 'Blast (GL Detail Report)', 'lending_marts', 'blast_gl_stage',
+    'append', 500, 'GL Detail Report', false,
+    1,
+    -- Nombres CRUDOS, como vienen en el archivo. Las cinco que identifican al
+    -- reporte: sin ellas no es un GL Detail Report.
+    array[
+        'GLNumber',
+        'CheckDescription',
+        'JournalPostDate',
+        'Debit',
+        'Credit'
+    ],
+    '{}'
+)
+on conflict (source_key) do nothing;
+
+-- Las 11 columnas del archivo y el nombre que produce el normalizador. Vale
+-- notar que camelCase NO se parte -- el normalizador solo corta donde hay algo
+-- que no es letra ni digito -- asi que 'GLNumber' da 'glnumber' y no
+-- 'gl_number'. Coinciden con los 11 campos STRING de blast_gl_stage:
 --
--- insert into uploads.source (
---     source_key, display_name, target_dataset, target_table,
---     load_mode, min_rows_expected, sheet_name, is_active,
---     header_row, required_columns, drop_columns
--- )
--- values (
---     'blast', 'Blast', 'lending_marts', '<tabla destino>',
---     'append', <minimo de filas>, '<hoja>', false,
---     1, array['<columna cruda 1>', '<columna cruda 2>'], '{}'
--- )
--- on conflict (source_key) do nothing;
+--   GLNumber         -> glnumber          Vendor       -> vendor
+--   GLName           -> glname            InvoiceNumb  -> invoicenumb
+--   CheckDescription -> checkdescription  RefNumb      -> refnumb
+--   JournalPostDate  -> journalpostdate   DocType      -> doctype
+--   BegBalance       -> begbalance        Debit        -> debit
+--                                         Credit       -> credit
+--
+-- Mas upload_batch_id, uploaded_at y row_index: 14 campos en total.
 
 -- Asignar la fuente a quien la vaya a cargar. Sin una fila acá, la persona entra
 -- a la app y no ve ninguna fuente -- que es el comportamiento correcto.
