@@ -35,9 +35,15 @@ const {
  *   - un dataset con permiso de IAM pero fuera de esta lista se rechaza acá.
  * O sea que agregar uno son SIEMPRE dos pasos, y este archivo es el segundo.
  *
- *   lending_marts     encompass_loans_stage, blast_gl_stage
- *   hr_centralizado   active_roster_stage (roster_co), hr_usa_directory_stage (roster_us)
- *   comp_marts        —
+ * Qué fuente escribe dónde:
+ *
+ *   lending_marts    encompass_loans_stage       (encompass)
+ *                    blast_gl_stage              (blast, append)
+ *   hr_centralizado  active_roster_stage         (roster_co)
+ *                    hr_usa_directory_stage      (roster_us)
+ *   comp_marts       plan_tier_stage             (comp_plan_tier)
+ *                    payroll_by_loan_stage       (comp_by_loan)
+ *                    payroll_transaction_stage   (comp_transactions)
  */
 export const ALLOWED_WRITE_DATASETS = new Set([
   'lending_marts',
