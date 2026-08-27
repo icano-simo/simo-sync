@@ -23,13 +23,27 @@ const {
 } = process.env as Record<string, string>;
 
 /**
- * Datasets donde esta credencial puede escribir. La restricción real es de IAM
- * -- la service account sólo tiene permiso sobre `lending_marts` -- y esto es
- * la misma regla escrita del lado del código, para que una fila mal configurada
- * en `uploads.source` falle acá con un mensaje claro en vez de con un 403 de
- * Google a mitad de la carga.
+ * Datasets donde esta credencial puede escribir.
+ *
+ * La restricción REAL es de IAM: esta lista no otorga nada, sólo evita que una
+ * fila mal configurada en `uploads.source` termine en un 403 de Google a mitad
+ * de la carga en vez de en un mensaje que dice cuál es el dataset y cuáles son
+ * los permitidos.
+ *
+ * Que la lista y el IAM sean dos cosas separadas corta para los dos lados:
+ *   - un dataset acá sin permiso de IAM falla igual, con el 403 de Google;
+ *   - un dataset con permiso de IAM pero fuera de esta lista se rechaza acá.
+ * O sea que agregar uno son SIEMPRE dos pasos, y este archivo es el segundo.
+ *
+ *   lending_marts     encompass_loans_stage, blast_gl_stage
+ *   hr_centralizado   active_roster_stage (roster_co), hr_usa_directory_stage (roster_us)
+ *   comp_marts        —
  */
-export const ALLOWED_WRITE_DATASETS = new Set(['lending_marts']);
+export const ALLOWED_WRITE_DATASETS = new Set([
+  'lending_marts',
+  'hr_centralizado',
+  'comp_marts',
+]);
 
 let cached: BigQuery | null = null;
 
