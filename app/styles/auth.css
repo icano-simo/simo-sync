@@ -1,0 +1,215 @@
+/*
+ * ============================================================================
+ * PANTALLAS DE AUTENTICACIÓN — /login y /no-access
+ * ============================================================================
+ *
+ * Etapa AUTH1 — ARCHIVO NUEVO.
+ *
+ * Port visual de `app/login/page.tsx` y `app/no-access/page.tsx` del repo
+ * hermano **homesi-pl** (rama feature/user-authentication). Las dos apps viven
+ * bajo la misma marca y las usa el mismo tipo de persona, así que el login se
+ * tiene que sentir igual en las dos.
+ *
+ * ORIGINAL EN TAILWIND, ACÁ EN CSS: homesi-pl usa Tailwind; este repo no (ver
+ * la decisión de la etapa UX1 en docs/ARQUITECTURA.md). Cada utilidad se
+ * tradujo a su valor real, no a un equivalente aproximado:
+ *
+ *   bg-[#FCFCFA]        -> var(--canvas)        (mismo hex en los dos repos)
+ *   text-[#001A40]      -> var(--navy)          (idem)
+ *   bg-[#FF4040]        -> var(--coral)         (idem)
+ *   max-w-md            -> 448px
+ *   rounded-3xl         -> 24px
+ *   rounded-xl          -> 12px
+ *   rounded-full        -> var(--radius-full)
+ *   p-10                -> 40px
+ *   py-3 / py-3.5       -> 12px / 14px
+ *   shadow-lg           -> sombra equivalente, tintada con el navy de marca
+ *   focus:ring-[#001A40]/20 -> outline navy al 20%
+ *
+ * NO hay conflicto de paleta entre los dos repos: `--navy`, `--coral` y
+ * `--canvas` de tokens.css ya son exactamente #001A40 / #FF4040 / #FCFCFA.
+ */
+
+.auth-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--canvas);
+  padding: 40px 16px;
+}
+
+.auth-panel {
+  width: 100%;
+  max-width: 448px;
+}
+
+.auth-logo {
+  display: block;
+  margin: 0 auto 32px;
+  width: 100%;
+  max-width: 320px;
+  height: auto;
+}
+
+.auth-card {
+  background: #fff;
+  border-radius: 24px;
+  padding: 40px;
+  box-shadow: 0 10px 30px rgba(0, 26, 64, 0.1), 0 2px 8px rgba(0, 26, 64, 0.05);
+}
+
+/* ---- Formulario ---- */
+
+.auth-field + .auth-field {
+  margin-top: 20px;
+}
+
+.auth-label {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--navy);
+  margin-bottom: 4px;
+}
+
+.auth-input {
+  font-family: inherit;
+  width: 100%;
+  border: 1px solid var(--slate-200);
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 14px;
+  color: var(--navy);
+  background: #fff;
+}
+.auth-input::placeholder {
+  color: var(--slate-400);
+}
+.auth-input:focus {
+  outline: 2px solid rgba(0, 26, 64, 0.2);
+  outline-offset: 0;
+  border-color: var(--slate-300);
+}
+
+.auth-submit {
+  font-family: inherit;
+  margin-top: 24px;
+  width: 100%;
+  border: none;
+  border-radius: var(--radius-full);
+  background: var(--coral);
+  color: #fff;
+  padding: 14px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.auth-submit:hover:not(:disabled) {
+  background: #e03535;
+}
+.auth-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/*
+ * El error se reserva DEBAJO del botón, como en homesi-pl: si apareciera
+ * arriba, empujaría el formulario y el botón se movería justo cuando la
+ * persona vuelve a hacer click.
+ */
+.auth-error {
+  margin: 8px 0 0;
+  font-size: 14px;
+  color: var(--rose-700);
+}
+
+/* ---- /change-password: encabezado alineado a la izquierda ---- */
+/*
+ * Distinto de `.auth-title`/`.auth-text`, que van centrados en /no-access: acá
+ * el texto encabeza un formulario, y centrarlo sobre campos alineados a la
+ * izquierda se lee torcido.
+ */
+.auth-heading {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--navy);
+  margin: 0;
+}
+.auth-subtitle {
+  margin: 4px 0 24px;
+  font-size: 14px;
+  color: var(--slate-500);
+  line-height: 1.5;
+}
+
+/* ---- /no-access ---- */
+
+.auth-icon {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+.auth-icon span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--amber-50);
+  color: var(--amber-700);
+}
+
+.auth-title {
+  font-family: var(--font-display);
+  text-align: center;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--navy);
+  margin: 0;
+}
+
+.auth-text {
+  margin: 8px 0 0;
+  text-align: center;
+  font-size: 14px;
+  color: var(--slate-500);
+  line-height: 1.5;
+}
+
+.auth-note {
+  margin-top: 16px;
+  border: 1px solid var(--slate-200);
+  background: var(--slate-50);
+  border-radius: 12px;
+  padding: 12px 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--slate-600);
+  line-height: 1.5;
+}
+
+.auth-secondary {
+  font-family: inherit;
+  margin-top: 24px;
+  width: 100%;
+  border: 1px solid var(--slate-200);
+  border-radius: var(--radius-full);
+  background: #fff;
+  padding: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--slate-600);
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.auth-secondary:hover:not(:disabled) {
+  border-color: var(--navy);
+}
+.auth-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

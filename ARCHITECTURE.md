@@ -33,7 +33,7 @@ estado final.
 
 - **Ruta:** `app/api/sync/route.ts`
 - **Cron:** `vercel.json` → `0 8 * * *` (08:00 UTC)
-- **Clientes compartidos:** `lib/bigquery.ts`, `lib/supabase.ts`
+- **Clientes compartidos:** `lib/bigquery.ts`, `lib/supabase-admin.ts`
 - **Límite de ejecución:** `maxDuration = 300` (requiere plan Pro)
 
 ### Por qué 08:00 UTC
@@ -245,7 +245,7 @@ este pipeline.
   coincide. Si `CRON_SECRET` no está configurado, falla cerrado. Sin esto la
   URL quedaría abierta a internet. Vercel inyecta
   `Authorization: Bearer $CRON_SECRET` en las invocaciones de cron.
-- **`SUPABASE_SERVICE_ROLE`** solo se usa del lado servidor. `lib/supabase.ts`
+- **`SUPABASE_SERVICE_ROLE`** solo se usa del lado servidor. `lib/supabase-admin.ts`
   importa `server-only`, así que un import accidental desde un componente de
   cliente rompe el build en vez de filtrar la llave. Nunca se registra en
   logs; los errores de configuración reportan **nombres** de variables, nunca

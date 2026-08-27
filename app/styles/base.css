@@ -1,0 +1,44 @@
+/*
+ * Reset + tipografía base.
+ *
+ * Etapa UX1 (overhaul Service Hub): el layout dejó de ser un flex horizontal
+ * con sidebar (`.app{display:flex}` + `<aside class="sidebar">`) y pasó a ser
+ * una columna: header sticky arriba + canvas a todo el ancho debajo. El
+ * scroll ahora es del documento, no de un `.content` con overflow propio
+ * (ver legacy-components.css) — eso es lo que hace que el header
+ * `position:sticky` funcione.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-body);
+  background: var(--canvas);
+  color: var(--navy);
+  -webkit-font-smoothing: antialiased;
+  font-size: 14px;
+  /*
+   * Regla del spec: "DO NOT use retro/pixelated/monospace fonts for numbers.
+   * Enforce Inter with font-variant-numeric: tabular-nums". Se aplica global
+   * acá para que ninguna tabla/tarjeta tenga que acordarse de pedirlo.
+   */
+  font-variant-numeric: tabular-nums;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.hidden {
+  display: none !important;
+}

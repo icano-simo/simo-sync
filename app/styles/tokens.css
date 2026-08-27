@@ -1,0 +1,113 @@
+/*
+ * ============================================================================
+ * TOKENS DE DISEÑO — HOMESÍ BRAND BOOK 2025
+ * ============================================================================
+ *
+ * Etapa UX1 (overhaul Service Hub) — REESCRITO. Antes este archivo tenía la
+ * paleta genérica azul/gris heredada del HTML legado (--accent:#2563eb,
+ * --navy:#1e3a5f, --bg:#f4f5f7, --sidebar:#0d1526...). Ahora la fuente de
+ * verdad es el Brand Book:
+ *
+ *   'Enriching Skies'  #001A40  -> texto primario, acentos navy, tabs activos
+ *   'Warm Embrace'     #FF4040  -> CTA principal, logo mark
+ *   'Light Sky'        #A6DEFF  -> highlight suave, hover de filas/celdas
+ *   'New Day'          #FCFCFA  -> fondo del canvas global
+ *
+ * QUÉ PASÓ CON LOS TOKENS VIEJOS (importante para quien revise el diff):
+ * se eliminaron todos los alias genéricos del legado — --bg, --card, --text,
+ * --muted, --muted-2, --border, --border-soft, --accent, --green, --green-tint,
+ * --red, --navy-row, --sidebar, --sidebar-icon, --shadow y los cinco --tag-*.
+ * Convivían con la escala nueva describiendo los mismos colores con dos
+ * nombres distintos, que es la receta para que la paleta se desincronice.
+ * Cada uso se migró al token concreto que corresponde (--navy, --slate-*,
+ * --emerald-*, --rose-*), verificado con grep archivo por archivo.
+ *
+ * Los tokens nuevos usan prefijos explícitos por familia:
+ *   --slate-*    escala neutra (equivalente a la de Tailwind, que es la que
+ *                referencia el spec: slate-100/200/300/400/500/800)
+ *   --emerald-*  verde suave para métricas positivas / Closed / Healthy
+ *   --rose-*     rosa suave para métricas negativas / montos de riesgo
+ *   --radius-*   radios de esquina (el spec pide rounded-2xl = 16px en
+ *                tarjetas y rounded-full = 9999px en pills)
+ *   --shadow-*   sombras (shadow-xs del spec)
+ */
+
+:root {
+  /* ---- Marca ------------------------------------------------------------ */
+  --navy: #001a40; /* 'Enriching Skies' */
+  --coral: #ff4040; /* 'Warm Embrace'   */
+  --sky: #a6deff; /* 'Light Sky'       */
+  --canvas: #fcfcfa; /* 'New Day'       */
+
+  /* ---- Escala neutra (slate) -------------------------------------------- */
+  --slate-50: #f8fafc;
+  --slate-100: #f1f5f9;
+  --slate-200: #e2e8f0;
+  --slate-300: #cbd5e1;
+  --slate-400: #94a3b8;
+  --slate-500: #64748b;
+  --slate-600: #475569;
+  --slate-700: #334155;
+  --slate-800: #1e293b;
+
+  /* ---- Semánticos de estado --------------------------------------------- */
+  --emerald-50: #ecfdf5;
+  --emerald-200: #a7f3d0;
+  --emerald-700: #047857;
+  --emerald-800: #065f46;
+  --rose-50: #fff1f2;
+  --rose-200: #fecdd3;
+  --rose-700: #be123c;
+  /*
+   * Etapa BP1: la escala ámbar existía a medias -- sólo 50 y 700, agregados en
+   * UX1 para el chip "Transferred" de Forecast. El módulo Business Plan
+   * necesita el estado INTERMEDIO de triage ("Need Attention"), que va entre el
+   * emerald de "bien" y el rose de "riesgo", y para eso hacen falta los pasos
+   * de borde y de texto fuerte que faltaban. Se completan siguiendo el mismo
+   * patrón de las otras escalas (mismos números, misma familia Tailwind), sin
+   * tocar los dos valores que ya estaban en uso.
+   */
+  --amber-50: #fffbeb;
+  --amber-100: #fef3c7;
+  --amber-200: #fde68a;
+  --amber-500: #f59e0b;
+  --amber-700: #b45309;
+  --amber-800: #92400e;
+
+  /* ---- Derivados de marca ------------------------------------------------ */
+  /* 'Light Sky' aclarado sobre blanco — fondo de pills, hover suave. */
+  --accent-soft: #eef6fd;
+  --accent-border: var(--sky);
+
+  /* Chip "Transferred" (Forecast) — alias legibles sobre la escala amber. */
+  --amber: var(--amber-50);
+  --amber-text: var(--amber-700);
+
+  /* ---- Forma y profundidad ---------------------------------------------- */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px; /* rounded-2xl del spec */
+  --radius-full: 9999px;
+  --shadow-xs: 0 1px 2px rgba(0, 26, 64, 0.05);
+  --shadow-lg: 0 20px 45px rgba(0, 26, 64, 0.18);
+
+  /* ---- Tipografía --------------------------------------------------------- */
+  /*
+   * --font-inter / --font-barlow los inyecta next/font en <html> (ver
+   * app/layout.tsx). Acá se envuelven con su fallback para que ninguna hoja
+   * de estilo tenga que repetir la cascada completa.
+   *   --font-body     Inter    -> body + tablas de datos
+   *   --font-display  Barlow   -> section headers y títulos
+   */
+  --font-body: var(--font-inter), -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-display: var(--font-barlow), var(--font-inter), -apple-system, 'Segoe UI', sans-serif;
+
+  /* ---- Layout ------------------------------------------------------------ */
+  /*
+   * Etapa UX6: baja de 1440 a 1380 para que la app no toque los bordes de la
+   * pantalla. Lo consumen `.hub-container` y `.hub-header__inner`, así que el
+   * logo del header queda alineado con el contenido de la página.
+   */
+  --container-max: 1380px;
+  --header-h: 60px;
+}

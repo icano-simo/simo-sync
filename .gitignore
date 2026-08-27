@@ -45,3 +45,8 @@ gcp-*.json
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# archivos de fuente -- nunca al repo: traen numeros de prestamo y nombres reales
+*.xlsx
+*.xls
+*.csv
