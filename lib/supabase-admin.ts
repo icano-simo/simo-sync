@@ -4,23 +4,37 @@
 import 'server-only';
 import { createClient } from '@supabase/supabase-js';
 
-/** Target schema for every table this job writes. */
+/** Schema por defecto del job de sync. Cuatro de sus cinco tablas viven ahí. */
 export const TARGET_SCHEMA = 'b2b_metrics';
 
-function build(url: string, serviceRole: string) {
+function build(url: string, serviceRole: string, schema: string) {
   return createClient(url, serviceRole, {
-    db: { schema: TARGET_SCHEMA },
+    db: { schema },
     auth: { persistSession: false, autoRefreshToken: false },
   });
 }
 
-/** Client bound to the b2b_metrics schema, not the default `public`. */
+/** Cliente atado a UN schema, nunca al `public` por defecto. */
 export type MetricsClient = ReturnType<typeof build>;
 
-let cached: MetricsClient | null = null;
+/**
+ * Un cliente por schema.
+ *
+ * `db.schema` se fija al construir el cliente y no se puede cambiar por
+ * consulta, así que dos schemas son dos clientes. Se cachean por nombre para no
+ * abrir uno nuevo en cada tabla del sync.
+ */
+const cache = new Map<string, MetricsClient>();
 
-export function getSupabaseClient(): MetricsClient {
-  if (cached) return cached;
+/**
+ * Cliente de service_role sobre `schema`.
+ *
+ * Sin argumento devuelve el de `b2b_metrics`, que es lo que esperaban las
+ * cuatro tablas originales del sync.
+ */
+export function getSupabaseClient(schema: string = TARGET_SCHEMA): MetricsClient {
+  const hit = cache.get(schema);
+  if (hit) return hit;
 
   const url = process.env.SUPABASE_URL;
   const serviceRole = process.env.SUPABASE_SERVICE_ROLE;
@@ -34,8 +48,9 @@ export function getSupabaseClient(): MetricsClient {
     throw new Error(`Missing Supabase env vars: ${missing.join(', ')}`);
   }
 
-  cached = build(url, serviceRole);
-  return cached;
+  const client = build(url, serviceRole, schema);
+  cache.set(schema, client);
+  return client;
 }
 
 /**

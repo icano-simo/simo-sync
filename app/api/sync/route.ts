@@ -3,7 +3,12 @@
  *
  * Target tables and their primary keys already exist and are not created or
  * altered here. Rows are upserted, then rows that no longer exist upstream are
- * swept; Salesforce is the source of truth for all five. TRUNCATE is never used.
+ * swept, so each target ends the run as a mirror of its source. TRUNCATE is
+ * never used: an upsert leaves no window where the table is empty, which
+ * matters because these tables are read by live apps.
+ *
+ * Six tables across two schemas -- b2b_metrics (Salesforce) and
+ * activity_report (Encompass + Salesforce).
  *
  * Order of operations is deliberate:
  *   1. authorize  2. freshness gate  3. write  4. sweep  5. verify by counting
@@ -15,7 +20,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { NextRequest } from 'next/server';
 import { getBigQueryClient, normalizeRow } from '@/lib/bigquery';
-import { getSupabaseClient } from '@/lib/supabase-admin';
+import { getSupabaseClient, TARGET_SCHEMA } from '@/lib/supabase-admin';
 
 export const dynamic = 'force-dynamic';
 // ~24,700 rows for leads_v2 alone; the default 15s ceiling is not enough.
@@ -25,11 +30,37 @@ const BATCH_SIZE = 500;
 const MAX_DATA_AGE_HOURS = 30;
 
 /**
- * Holds 18 rows with source='manual' -- human decisions with no upstream copy
- * to rebuild from. Nothing in this job may write to it OR sweep it; both paths
- * check this set, and the write path asserts at request time.
+ * Both guard lists are SCHEMA-QUALIFIED, and have to be.
+ *
+ * Since activity_report joined b2b_metrics, a bare table name no longer
+ * identifies a table: two schemas can hold the same name and mean different
+ * things. `activity_report.loan_records` is exactly the case that matters --
+ * one letter and a suffix away from `loan_records_v2`, which this job does
+ * write.
  */
-const NEVER_WRITE = new Set(['master_assignments']);
+function qualified(spec: Pick<TableSyncBase, 'schema' | 'target'>): string {
+  return `${spec.schema ?? TARGET_SCHEMA}.${spec.target}`;
+}
+
+/**
+ * Tables this job must never write to OR sweep. Both paths check this set, and
+ * the write path asserts at request time.
+ *
+ *   b2b_metrics.master_assignments  18 rows with source='manual' -- human
+ *                                   decisions with no upstream copy to rebuild
+ *                                   from.
+ *   activity_report.loan_records    la tabla que alimenta la app de actividad
+ *                                   comercial hoy, cargada a mano desde un
+ *                                   archivo. loan_records_v2 la reemplaza, pero
+ *                                   la vieja queda intacta hasta que la app se
+ *                                   cambie y se verifique. Grano distinto
+ *                                   (préstamo x carga, no préstamo) y 23,584
+ *                                   filas que este job no sabe reconstruir.
+ */
+const NEVER_WRITE = new Set([
+  'b2b_metrics.master_assignments',
+  'activity_report.loan_records',
+]);
 
 /**
  * The only tables the sweep may delete from. An allowlist rather than a
@@ -37,11 +68,12 @@ const NEVER_WRITE = new Set(['master_assignments']);
  * here deliberately. NEVER_WRITE is still checked on top of this.
  */
 const SWEEPABLE = new Set([
-  'leads_v2',
-  'opportunities_v2',
-  'calls_daily',
-  'dim_bd',
-  'realtor_owner_map_v2',
+  'b2b_metrics.leads_v2',
+  'b2b_metrics.opportunities_v2',
+  'b2b_metrics.calls_daily',
+  'b2b_metrics.dim_bd',
+  'b2b_metrics.realtor_owner_map_v2',
+  'activity_report.loan_records_v2',
 ]);
 
 type TableSyncBase = {
@@ -49,8 +81,10 @@ type TableSyncBase = {
   name: string;
   /** BigQuery source, dataset-qualified. */
   source: string;
-  /** Supabase table inside the b2b_metrics schema. */
+  /** Supabase table. */
   target: string;
+  /** Schema de `target`. Sin esto, `b2b_metrics`. */
+  schema?: string;
   /** Column list for ON CONFLICT; comma-separated for composite keys. */
   conflict: string;
 };
@@ -195,6 +229,73 @@ const SYNCS: TableSync[] = [
       ) WHERE rn = 1
     `,
   },
+  {
+    /*
+     * Actividad comercial. Primera tabla del job fuera de b2b_metrics.
+     *
+     * GRANO: un préstamo. Verificado contra la vista antes de escribir esto --
+     * 4,779 filas, 4,779 loan_number distintos, ninguno nulo -- así que
+     * loan_number sirve como clave de conflicto y ninguna tanda puede traer dos
+     * filas que colisionen (el problema que tuvo realtor_owner_map).
+     *
+     * La vista expone 90 columnas; van las 36 que la tabla necesita, con los
+     * renombres en SQL como en las demás. Los tipos se verificaron contra los
+     * dos lados: las fechas son DATE en la vista y DATE en la tabla, no el
+     * texto 'YYYY-MM' de la loan_records vieja, `closing_month` incluido.
+     *
+     * OJO AL AGREGAR: `counts_for_division` es la columna para totales de
+     * división; `is_closed` es sólo para el detalle de una sucursal. Hoy la
+     * diferencia son 5 préstamos -- 466 cerrados contra 461 que cuentan --
+     * porque un HELOC de segundo gravamen le suma al loan officer y no a la
+     * división. Usar is_closed en un agregado infla los cierres sin que nada
+     * falle.
+     */
+    name: 'commercial_activity',
+    source: 'lending_marts.fct_commercial_activity',
+    target: 'loan_records_v2',
+    schema: 'activity_report',
+    conflict: 'loan_number',
+    select: [
+      'loan_number',
+      'borrower_name',
+      'loan_officer_name AS loan_officer',
+      'loan_officer_person_code',
+      'branch_code AS branch',
+      'loan_amount AS total_loan_amount',
+      'loan_program',
+      'loan_type',
+      'loan_channel',
+      'loan_folder AS loan_folder_name',
+      'lien_position',
+      'ms_started AS file_creation_date',
+      'credit_report_date',
+      'application_date AS app_date',
+      'closing_date',
+      'closing_month',
+      'is_closed',
+      'counts_for_division',
+      'is_second_lien_heloc',
+      'strategy',
+      'loan_officer_strategy',
+      'has_salesforce',
+      'realtor_bd AS bd',
+      // La vista no expone is_b2b: se deriva de la estrategia, que ya resuelve
+      // la precedencia Affinity > NPPM > Recruitment > B2B > Own Production.
+      "strategy = 'B2B' AS is_b2b",
+      'referred_by_realtor',
+      'buyers_agent',
+      'nppm_realtor',
+      'realtor_es_nppm',
+      'nppm_recruited_by',
+      'opportunity_owner',
+      'owner_title',
+      'sf_stage',
+      'branch_source',
+      'branch_code_encompass AS branch_encompass',
+      'is_affinity',
+      'was_reclassified',
+    ].join(', '),
+  },
 ];
 
 // MIN, not MAX: the most stale table gates the run. With MAX, one table
@@ -285,8 +386,8 @@ async function syncTable(
   // completed without error, since any failure threw.
   let filas_borradas: number | null = null;
 
-  if (NEVER_WRITE.has(spec.target)) {
-    throw new Error(`refusing to sweep protected table ${spec.target}`);
+  if (NEVER_WRITE.has(qualified(spec))) {
+    throw new Error(`refusing to sweep protected table ${qualified(spec)}`);
   }
 
   if (rows.length === 0) {
@@ -295,7 +396,7 @@ async function syncTable(
     console.warn(
       `[sync] ${spec.name}: source returned 0 rows, skipping sweep`,
     );
-  } else if (!SWEEPABLE.has(spec.target)) {
+  } else if (!SWEEPABLE.has(qualified(spec))) {
     console.warn(`[sync] ${spec.name}: not in SWEEPABLE, skipping sweep`);
   } else {
     const { count: deleted, error: deleteError } = await sb
@@ -328,7 +429,7 @@ async function syncTable(
   );
 
   return {
-    tabla: spec.target,
+    tabla: qualified(spec),
     filas_bigquery: rows.length,
     filas_supabase: count ?? null,
     filas_borradas,
@@ -345,13 +446,13 @@ export async function GET(req: NextRequest) {
     return Response.json({ ok: false, error: 'unauthorized' }, { status: 401 });
   }
 
-  const illegal = SYNCS.filter((s) => NEVER_WRITE.has(s.target));
+  const illegal = SYNCS.filter((s) => NEVER_WRITE.has(qualified(s)));
   if (illegal.length) {
     return Response.json(
       {
         ok: false,
         error: `refusing to run: protected table(s) targeted: ${illegal
-          .map((s) => s.target)
+          .map((s) => qualified(s))
           .join(', ')}`,
       },
       { status: 500 },
@@ -409,12 +510,14 @@ export async function GET(req: NextRequest) {
   const resultados: TableResult[] = [];
   for (const spec of SYNCS) {
     try {
-      resultados.push(await syncTable(spec, bq, sb, syncedAt));
+      // Un cliente por schema: `db.schema` se fija al construir y no se puede
+      // cambiar por consulta. Vienen cacheados, así que esto no abre conexiones.
+      resultados.push(await syncTable(spec, bq, getSupabaseClient(spec.schema), syncedAt));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[sync] ${spec.name} failed: ${message}`);
       resultados.push({
-        tabla: spec.target,
+        tabla: qualified(spec),
         filas_bigquery: 0,
         filas_supabase: null,
         filas_borradas: null,
