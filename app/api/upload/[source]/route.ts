@@ -17,7 +17,7 @@
  * parciales -- borra los buenos y pone basura. Por eso también se aborta entero
  * y nunca a medias.
  */
-import type { NextRequest } from 'next/server';
+import { after, type NextRequest } from 'next/server';
 import type { User } from '@supabase/supabase-js';
 import { getSessionUser } from '@/lib/auth/session';
 import { hasAppAccess } from '@/lib/auth/appAccess';
@@ -39,6 +39,82 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 // Parsear ~5,000 filas y esperar el load job de BigQuery no entra en el default.
 export const maxDuration = 300;
+
+/**
+ * ============================================================================
+ * DISPARO DEL SYNC DESPUÉS DE UNA CARGA
+ * ============================================================================
+ *
+ * La app de Commercial Activity dejó de leer un archivo cargado a mano y ahora
+ * lee `activity_report.loan_records_v2`, que se llena desde BigQuery en el cron
+ * de las 08:00 UTC. Sin esto, un Encompass subido a las 3 de la tarde no se ve
+ * hasta el día siguiente -- una regresión frente a la carga directa anterior.
+ *
+ * SÓLO PARA LAS FUENTES QUE ALIMENTAN UNA TABLA SINCRONIZADA. Los rosters, Blast
+ * y las de Compensafe escriben tablas que el sync no lee, así que dispararlo por
+ * ellas serían 20 segundos de trabajo para nada.
+ *
+ * LO QUE ESTO NO ARREGLA: sólo acelera lo que viene de Encompass. Si el dato que
+ * falta viene de Salesforce -- una oportunidad, un realtor, una estrategia --
+ * hay que esperar igual al transfer de la 1:03 AM, que no controlamos. Correr el
+ * sync antes de eso no lo adelanta: leería de BigQuery lo mismo que ya está.
+ */
+const SYNC_AFTER_UPLOAD = new Set(['encompass']);
+
+/** Cuánto se espera para poder CONTAR qué pasó. El sync sigue si no contesta. */
+const SYNC_CONFIRM_MS = 5_000;
+/** Techo del disparo. El sync completo tarda ~20s; esto es sólo un corte sano. */
+const SYNC_TIMEOUT_MS = 120_000;
+
+type SyncTrigger = {
+  /** ¿Se llegó a llamar al sync? */
+  disparado: boolean;
+  /** ¿Contestó dentro de SYNC_CONFIRM_MS? Si no, sigue corriendo. */
+  confirmado: boolean;
+  /** Resultado del sync, cuando alcanzó a contestar. */
+  ok: boolean | null;
+  error: string | null;
+};
+
+/**
+ * Llama al endpoint del cron sobre el propio origen.
+ *
+ * Se hace por HTTP y no importando la lógica del sync por dos razones: queda una
+ * sola ruta de autorización -- la misma cabecera que usa el cron, y no un
+ * segundo camino que pueda divergir -- y corre como su propia invocación, con su
+ * propio presupuesto de tiempo, en vez de gastar el de esta carga.
+ *
+ * Funciona porque `/api/sync` está EXCLUIDA del matcher del gate (ver proxy.ts):
+ * si pasara por ahí, esta llamada sin cookie de sesión se llevaría un 401.
+ *
+ * NUNCA RECHAZA. Devuelve el fallo como dato, porque quien la llama ya tiene una
+ * carga exitosa en la mano y ninguna falla de acá puede convertirla en un error.
+ */
+async function triggerSync(origin: string, secret: string): Promise<SyncTrigger> {
+  try {
+    const res = await fetch(`${origin}/api/sync`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${secret}` },
+      signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
+      cache: 'no-store',
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return {
+        disparado: true,
+        confirmado: true,
+        ok: false,
+        error: `sync responded ${res.status}: ${body.slice(0, 300)}`,
+      };
+    }
+
+    return { disparado: true, confirmado: true, ok: true, error: null };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { disparado: true, confirmado: true, ok: false, error: message };
+  }
+}
 
 type SourceConfig = {
   source_key: string;
@@ -460,6 +536,58 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
         : `row count mismatch: parsed ${toLoad.rows.length}, table has ${rowsInTable}`,
     });
 
+    // ---- 9. Disparar el sync, sin dejar que afecte a esta carga ----------
+    /*
+     * Sólo si la carga fue buena y sólo para las fuentes que alimentan una tabla
+     * sincronizada. Un `matches` falso significa que la tabla no quedó como
+     * esperábamos: sincronizar eso a Supabase propagaría el problema.
+     *
+     * `after()` mantiene viva la invocación hasta que el sync termine, aunque la
+     * respuesta ya se haya ido. Sin eso, en serverless la función puede quedar
+     * congelada al responder y cortar el fetch a mitad de camino.
+     *
+     * Y se corre igual una carrera contra SYNC_CONFIRM_MS para poder decir en la
+     * respuesta qué pasó: si el sync contesta rápido, el usuario se entera acá
+     * mismo; si no, se le dice que quedó disparado y sigue. Nunca se lo hace
+     * esperar los ~20 segundos completos.
+     */
+    let sync: SyncTrigger = { disparado: false, confirmado: false, ok: null, error: null };
+
+    if (matches && SYNC_AFTER_UPLOAD.has(sourceKey)) {
+      const secret = process.env.CRON_SECRET;
+
+      if (!secret) {
+        // No es un fallo de la carga: el archivo ya está en BigQuery.
+        sync = {
+          disparado: false,
+          confirmado: false,
+          ok: null,
+          error: 'CRON_SECRET is not configured; the nightly cron will pick it up',
+        };
+        console.error('[upload] cannot trigger sync: CRON_SECRET is not set');
+      } else {
+        const running = triggerSync(req.nextUrl.origin, secret).then((result) => {
+          // El log del servidor es el único registro duradero de esto: la
+          // respuesta se la lleva el navegador y `load_log` ya se escribió.
+          if (!result.ok) {
+            console.error(`[upload] sync after ${sourceKey} failed: ${result.error}`);
+          } else {
+            console.log(`[upload] sync after ${sourceKey} completed`);
+          }
+          return result;
+        });
+
+        after(() => running);
+
+        const settled = await Promise.race([
+          running,
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), SYNC_CONFIRM_MS)),
+        ]);
+
+        sync = settled ?? { disparado: true, confirmado: false, ok: null, error: null };
+      }
+    }
+
     return Response.json(
       {
         ok: matches,
@@ -467,6 +595,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
         archivo: fileName,
         destino: `${sourceRow.target_dataset}.${sourceRow.target_table}`,
         modo: sourceRow.load_mode,
+        sync_disparado: sync.disparado,
+        sync,
         // Sólo en 'append': en 'replace' la tabla entera es la carga.
         upload_batch_id: isAppend ? batch.uploadBatchId : null,
         filas_parseadas: toLoad.rows.length,

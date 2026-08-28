@@ -40,6 +40,39 @@ function formatDate(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
+/** Lo que la ruta devuelve sobre el sync que dispara al terminar la carga. */
+type SyncInfo = {
+  disparado?: boolean;
+  confirmado?: boolean;
+  ok?: boolean | null;
+  error?: string | null;
+};
+
+/**
+ * Qué decirle a quien acaba de subir el archivo sobre la app de Commercial
+ * Activity.
+ *
+ * `null` cuando la fuente no alimenta ninguna tabla sincronizada: la mayoría no
+ * lo hace, y una línea sobre un sync que no corresponde sólo confunde.
+ *
+ * Cuando el sync falla NO se muestra como error: el archivo ya está cargado. Lo
+ * único que cambia es cuándo lo ve la otra app, y eso es lo que dice el texto.
+ */
+function syncMessage(sync: SyncInfo | undefined): string | null {
+  if (!sync) return null;
+
+  if (sync.disparado && sync.confirmado && sync.ok) {
+    return 'Commercial Activity ya quedó actualizada.';
+  }
+  if (sync.disparado && !sync.confirmado) {
+    return 'Actualizando Commercial Activity… puede tardar un minuto; no hace falta esperar acá.';
+  }
+  if (sync.disparado || sync.error) {
+    return 'Los datos ya están en BigQuery. Commercial Activity se actualiza en la corrida de las 08:00 UTC.';
+  }
+  return null;
+}
+
 export default function UploadCard({ source, recent }: { source: SourceRow; recent: LoadEntry[] }) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -164,16 +197,22 @@ export default function UploadCard({ source, recent }: { source: SourceRow; rece
         <div className="upload-result">Archivo subido. Validando y cargando a BigQuery…</div>
       ) : null}
 
-      {result?.kind === 'ok' ? (
-        <div className="upload-result upload-result--ok">
-          Cargadas <strong>{String(result.body.filas_en_tabla)}</strong> filas en{' '}
-          {String(result.body.destino)} ({String(result.body.columnas)} columnas
-          {result.body.filas_descartadas
-            ? `, ${String(result.body.filas_descartadas)} filas descartadas`
-            : ''}
-          ).
-        </div>
-      ) : null}
+      {result?.kind === 'ok'
+        ? (() => {
+            const nota = syncMessage(result.body.sync as SyncInfo | undefined);
+            return (
+              <div className="upload-result upload-result--ok">
+                Cargadas <strong>{String(result.body.filas_en_tabla)}</strong> filas en{' '}
+                {String(result.body.destino)} ({String(result.body.columnas_cargadas)} columnas
+                {result.body.filas_descartadas
+                  ? `, ${String(result.body.filas_descartadas)} filas descartadas`
+                  : ''}
+                ).
+                {nota ? <div className="upload-result__note">{nota}</div> : null}
+              </div>
+            );
+          })()
+        : null}
 
       {result?.kind === 'err' ? (
         <div className="upload-result upload-result--err">

@@ -176,6 +176,18 @@
 .upload-result strong {
   font-weight: 700;
 }
+
+/*
+ * Segunda línea del banner: qué pasa con la app que consume estos datos. Va
+ * atenuada y separada porque es consecuencia de la carga, no su resultado.
+ */
+.upload-result__note {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid currentColor;
+  opacity: 0.75;
+  font-size: 12.5px;
+}
 .upload-result ul {
   margin: 8px 0 0;
   padding-left: 18px;
