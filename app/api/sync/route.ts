@@ -21,6 +21,11 @@ import { timingSafeEqual } from 'node:crypto';
 import type { NextRequest } from 'next/server';
 import { getBigQueryClient, normalizeRow } from '@/lib/bigquery';
 import { getSupabaseClient, TARGET_SCHEMA } from '@/lib/supabase-admin';
+import {
+  syncPipelineSnapshot,
+  PIPELINE_SCHEMA,
+  type PipelineSyncResult,
+} from '@/lib/sync/pipelineSnapshot';
 
 export const dynamic = 'force-dynamic';
 // ~24,700 rows for leads_v2 alone; the default 15s ceiling is not enough.
@@ -315,6 +320,8 @@ type TableResult = {
   coincide: boolean;
   duracion_ms: number;
   error: string | null;
+  /** Sólo el pipeline: escribe tres tablas y un conteo solo no lo describe. */
+  detalle?: PipelineSyncResult;
 };
 
 /** Constant-time compare so the secret cannot be recovered byte by byte. */
@@ -526,6 +533,50 @@ export async function GET(req: NextRequest) {
         error: message,
       });
     }
+  }
+
+  /*
+   * El pipeline va aparte del bucle porque no es una tabla espejo: escribe tres
+   * tablas emparentadas y se reemplaza por día. Su resultado entra en la misma
+   * lista para que una corrida se lea de una sola forma, y falla igual de
+   * aislado que las demás -- que el pipeline se caiga no puede llevarse puestas
+   * las seis anteriores, que ya escribieron bien.
+   */
+  const pipelineStarted = Date.now();
+  try {
+    const detalle = await syncPipelineSnapshot(bq);
+    console.log(
+      `[sync] pipeline: dia=${detalle.snapshot_date} snapshot=${detalle.snapshot_id} ` +
+        `pipeline=${detalle.pipeline} resueltos=${detalle.resueltos} ` +
+        `reemplazados=${detalle.snapshots_reemplazados}` +
+        (detalle.omitido ? ` omitido=${detalle.omitido}` : ''),
+    );
+    resultados.push({
+      tabla: `${PIPELINE_SCHEMA}.pipeline_snapshots (+loans, +resolved)`,
+      filas_bigquery: detalle.filas_origen,
+      filas_supabase:
+        detalle.verificado === null
+          ? null
+          : (detalle.verificado.loans ?? 0) + (detalle.verificado.resolved ?? 0),
+      filas_borradas: null,
+      // Un día sin filas en la vista se omite a propósito y no es un desajuste.
+      coincide: detalle.omitido !== null ? true : detalle.coincide,
+      duracion_ms: Date.now() - pipelineStarted,
+      error: null,
+      detalle,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[sync] pipeline failed: ${message}`);
+    resultados.push({
+      tabla: `${PIPELINE_SCHEMA}.pipeline_snapshots (+loans, +resolved)`,
+      filas_bigquery: 0,
+      filas_supabase: null,
+      filas_borradas: null,
+      coincide: false,
+      duracion_ms: Date.now() - pipelineStarted,
+      error: message,
+    });
   }
 
   const fallidas = resultados.filter((r) => r.error !== null);

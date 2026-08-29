@@ -54,12 +54,16 @@ export const maxDuration = 300;
  * y las de Compensafe escriben tablas que el sync no lee, así que dispararlo por
  * ellas serían 20 segundos de trabajo para nada.
  *
+ * En 'pipeline' pesa todavía más que en 'encompass': ese archivo se sube dos o
+ * tres veces al día JUSTAMENTE porque hace falta el dato fresco. Esperar al cron
+ * anularía el motivo de volver a subirlo.
+ *
  * LO QUE ESTO NO ARREGLA: sólo acelera lo que viene de Encompass. Si el dato que
  * falta viene de Salesforce -- una oportunidad, un realtor, una estrategia --
  * hay que esperar igual al transfer de la 1:03 AM, que no controlamos. Correr el
  * sync antes de eso no lo adelanta: leería de BigQuery lo mismo que ya está.
  */
-const SYNC_AFTER_UPLOAD = new Set(['encompass']);
+const SYNC_AFTER_UPLOAD = new Set(['encompass', 'pipeline']);
 
 /** Cuánto se espera para poder CONTAR qué pasó. El sync sigue si no contesta. */
 const SYNC_CONFIRM_MS = 5_000;

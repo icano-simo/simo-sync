@@ -49,8 +49,17 @@ type SyncInfo = {
 };
 
 /**
- * Qué decirle a quien acaba de subir el archivo sobre la app de Commercial
- * Activity.
+ * Qué app consume cada fuente. Se nombra la app y no la tabla porque es lo que
+ * quien sube el archivo reconoce -- va a ir a mirar ahí si el dato apareció.
+ */
+const APP_POR_FUENTE: Record<string, string> = {
+  encompass: 'Commercial Activity',
+  pipeline: 'Forecast & Pipeline',
+};
+
+/**
+ * Qué decirle a quien acaba de subir el archivo sobre la app que lee estos
+ * datos.
  *
  * `null` cuando la fuente no alimenta ninguna tabla sincronizada: la mayoría no
  * lo hace, y una línea sobre un sync que no corresponde sólo confunde.
@@ -58,17 +67,19 @@ type SyncInfo = {
  * Cuando el sync falla NO se muestra como error: el archivo ya está cargado. Lo
  * único que cambia es cuándo lo ve la otra app, y eso es lo que dice el texto.
  */
-function syncMessage(sync: SyncInfo | undefined): string | null {
+function syncMessage(sync: SyncInfo | undefined, sourceKey: string): string | null {
   if (!sync) return null;
 
+  const app = APP_POR_FUENTE[sourceKey] ?? 'la app que consume estos datos';
+
   if (sync.disparado && sync.confirmado && sync.ok) {
-    return 'Commercial Activity ya quedó actualizada.';
+    return `${app} ya quedó actualizada.`;
   }
   if (sync.disparado && !sync.confirmado) {
-    return 'Actualizando Commercial Activity… puede tardar un minuto; no hace falta esperar acá.';
+    return `Actualizando ${app}… puede tardar un minuto; no hace falta esperar acá.`;
   }
   if (sync.disparado || sync.error) {
-    return 'Los datos ya están en BigQuery. Commercial Activity se actualiza en la corrida de las 08:00 UTC.';
+    return `Los datos ya están en BigQuery. ${app} se actualiza en la corrida de las 08:00 UTC.`;
   }
   return null;
 }
@@ -199,7 +210,7 @@ export default function UploadCard({ source, recent }: { source: SourceRow; rece
 
       {result?.kind === 'ok'
         ? (() => {
-            const nota = syncMessage(result.body.sync as SyncInfo | undefined);
+            const nota = syncMessage(result.body.sync as SyncInfo | undefined, source.source_key);
             return (
               <div className="upload-result upload-result--ok">
                 Cargadas <strong>{String(result.body.filas_en_tabla)}</strong> filas en{' '}
