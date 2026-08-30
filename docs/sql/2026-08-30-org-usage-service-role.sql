@@ -1,0 +1,56 @@
+-- ===========================================================================
+-- El sync necesita USAGE sobre el esquema `org`
+-- ===========================================================================
+--
+-- Ejecutar como `postgres` en el SQL Editor de Supabase (proyecto simoOS-prod).
+-- Idempotente.
+--
+-- ⚠ SIN ESTO LA OCTAVA TABLA DEL SYNC FALLA. No en silencio: la corrida
+-- devuelve `permission denied for schema org` en el resultado de esa tabla y
+-- sigue con las demás.
+--
+--
+-- ---------------------------------------------------------------------------
+-- MEDIDO ANTES DE ESCRIBIR ESTO, no supuesto
+-- ---------------------------------------------------------------------------
+--
+--   select n.nspname,
+--          has_schema_privilege('service_role', n.nspname, 'USAGE') as usage,
+--          has_table_privilege('service_role', 'org.roster_current', 'INSERT') as insert
+--     from pg_namespace n where n.nspname in ('org', 'activity_report');
+--
+--     org               usage = FALSE   insert = true
+--     activity_report   usage = TRUE    insert = true
+--
+-- O sea: `service_role` ya puede escribir la TABLA pero no puede ATRAVESAR el
+-- esquema. Es exactamente lo que pasó con `activity_report` cuando entró
+-- `loan_records_v2`, y por qué ese esquema hoy sí lo tiene.
+--
+-- Los permisos de tabla sin USAGE sobre el esquema no sirven de nada: Postgres
+-- corta en el esquema antes de mirar la tabla. Son dos permisos, y tener uno se
+-- parece mucho a tener los dos hasta que se prueba.
+-- ===========================================================================
+
+grant usage on schema org to service_role;
+
+
+-- ===========================================================================
+-- LO QUE ESTO NO HACE
+-- ===========================================================================
+--
+-- USAGE no da acceso a ninguna tabla: sólo permite nombrarlas. Lo que
+-- `service_role` puede hacer dentro de `org` lo siguen decidiendo los GRANT de
+-- cada tabla, uno por uno. En particular NO abre `org.dim_employee` a nada que
+-- no tuviera ya.
+--
+-- Verificación:
+--
+--   select has_schema_privilege('service_role', 'org', 'USAGE');   -> true
+--
+--   -- y que no se haya abierto nada de más: esto lista lo que service_role
+--   -- puede tocar en org, tabla por tabla
+--   select table_name, string_agg(privilege_type, ', ' order by privilege_type)
+--     from information_schema.role_table_grants
+--    where table_schema = 'org' and grantee = 'service_role'
+--    group by 1 order by 1;
+-- ===========================================================================
