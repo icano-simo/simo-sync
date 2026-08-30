@@ -7,8 +7,9 @@
  * never used: an upsert leaves no window where the table is empty, which
  * matters because these tables are read by live apps.
  *
- * Six tables across two schemas -- b2b_metrics (Salesforce) and
- * activity_report (Encompass + Salesforce).
+ * Seven tables across three schemas -- b2b_metrics (Salesforce),
+ * activity_report (Encompass + Salesforce) y org (roster de RRHH). El snapshot
+ * de pipeline, que corre aparte al final, es el octavo destino.
  *
  * Order of operations is deliberate:
  *   1. authorize  2. freshness gate  3. write  4. sweep  5. verify by counting
@@ -79,6 +80,36 @@ const SWEEPABLE = new Set([
   'b2b_metrics.dim_bd',
   'b2b_metrics.realtor_owner_map_v2',
   'activity_report.loan_records_v2',
+  /*
+   * ⚠ `org.roster_current` NO ESTÁ ACÁ, Y NO ES UN OLVIDO.
+   *
+   * El sweep borra las filas que no volvieron a aparecer arriba. Para las otras
+   * seis tablas eso es exactamente lo que se quiere: son espejos de su fuente.
+   * Para el roster, borrar a quien desapareció del archivo choca con dos cosas
+   * que ya están decididas:
+   *
+   *   1. La baja es MANUAL, a pedido explícito de la usuaria: un archivo de
+   *      RRHH incompleto desactivaría a quien sí está trabajando. Un sweep no
+   *      la desactivaría -- la BORRARÍA, que es peor: se lleva su historia con
+   *      ella.
+   *
+   *   2. La tabla tiene `left_detected_at`, una columna cuyo único sentido es
+   *      registrar que alguien dejó de aparecer. Si el sweep borra esas filas,
+   *      esa columna no se puede llenar nunca. La existencia de esa columna es
+   *      la prueba de que el diseño espera que las filas SOBREVIVAN a la
+   *      desaparición de la persona del archivo.
+   *
+   * Y hay un caso concreto que lo vuelve urgente: las personas con
+   * `source_kind = 'user_addition'` --hoy dos-- son justamente las que RRHH no
+   * tiene en sus archivos. Si la vista sale del archivo, el sweep las borraría
+   * en cada corrida, y la pantalla las volvería a perder cada mañana.
+   *
+   * Sin esta entrada, `syncTable` avisa por consola ("not in SWEEPABLE,
+   * skipping sweep") y sigue: hace el upsert y nada más, que es lo correcto
+   * mientras la baja sea una decisión humana. Si algún día se quiere el sweep,
+   * es agregar una línea acá -- pero antes hay que resolver los dos puntos de
+   * arriba.
+   */
 ]);
 
 type TableSyncBase = {
@@ -299,6 +330,57 @@ const SYNCS: TableSync[] = [
       'branch_code_encompass AS branch_encompass',
       'is_affinity',
       'was_reclassified',
+    ].join(', '),
+  },
+  {
+    /*
+     * Roster de RRHH, para la sección Admin de Commercial Activity. Primera
+     * tabla del job en el schema `org`.
+     *
+     * GRANO: una persona. `person_code` es la PK de la tabla destino, así que
+     * sirve de clave de conflicto y ninguna tanda puede traer dos filas que
+     * colisionen. Son 108 personas: una sola tanda de las de 500.
+     *
+     * MAPEO: la vista trae los mismos nombres que la tabla. Las tres
+     * diferencias, todas deliberadas:
+     *
+     *   hay_historia_de_cargas  NO se persiste. La calcula la vista y existe
+     *                           sólo para que la pantalla sepa si mostrar "sin
+     *                           registro" en las fechas. Guardar un valor
+     *                           derivado sería tener dos verdades sobre lo
+     *                           mismo, y la de la tabla envejecería.
+     *   left_detected_at        la maneja la tabla, no viene de la vista.
+     *   synced_at              lo escribe `syncTable` en cada fila.
+     *
+     * ⚠ `position` va entre backticks: es el nombre de una función de
+     * BigQuery. Como referencia de columna no colisiona, pero citarlo cuesta
+     * nada y saca la duda del medio.
+     *
+     * ⚠ NO TOCA `org.dim_employee`, que es otra tabla: tiene `employee_key`
+     * generado, 378 alias que lo referencian y una FK con cascada.
+     * `roster_current` no la reemplaza -- es de sólo lectura para Admin.
+     */
+    name: 'roster',
+    source: 'hr_centralizado.roster_for_admin',
+    target: 'roster_current',
+    schema: 'org',
+    conflict: 'person_code',
+    select: [
+      'person_code',
+      'display_name',
+      'name_in_file',
+      'country',
+      'branch_code',
+      '`position`',
+      'area',
+      'supervisor',
+      'supreme_email',
+      'is_active',
+      'source_kind',
+      'has_override',
+      'date_started',
+      'first_seen_at',
+      'last_seen_at',
     ].join(', '),
   },
 ];
