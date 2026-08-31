@@ -50,20 +50,31 @@ export const maxDuration = 300;
  * de las 08:00 UTC. Sin esto, un Encompass subido a las 3 de la tarde no se ve
  * hasta el día siguiente -- una regresión frente a la carga directa anterior.
  *
- * SÓLO PARA LAS FUENTES QUE ALIMENTAN UNA TABLA SINCRONIZADA. Los rosters, Blast
- * y las de Compensafe escriben tablas que el sync no lee, así que dispararlo por
- * ellas serían 20 segundos de trabajo para nada.
+ * SÓLO PARA LAS FUENTES QUE ALIMENTAN UNA TABLA SINCRONIZADA. Blast y las cuatro
+ * de Compensafe escriben tablas que el sync no lee, así que dispararlo por ellas
+ * serían 20 segundos de trabajo para nada.
+ *
+ *   encompass              -> activity_report.loan_records_v2  (Commercial Activity)
+ *   pipeline               -> pipeline_forecast.*              (Forecast & Pipeline)
+ *   roster_co / roster_us  -> org.roster_current               (Admin)
  *
  * En 'pipeline' pesa todavía más que en 'encompass': ese archivo se sube dos o
  * tres veces al día JUSTAMENTE porque hace falta el dato fresco. Esperar al cron
  * anularía el motivo de volver a subirlo.
  *
- * LO QUE ESTO NO ARREGLA: sólo acelera lo que viene de Encompass. Si el dato que
- * falta viene de Salesforce -- una oportunidad, un realtor, una estrategia --
- * hay que esperar igual al transfer de la 1:03 AM, que no controlamos. Correr el
- * sync antes de eso no lo adelanta: leería de BigQuery lo mismo que ya está.
+ * Los dos rosters disparan aunque escriban tablas de stage distintas
+ * (`active_roster_stage` y `hr_usa_directory_stage`): la vista
+ * `hr_centralizado.roster_for_admin`, que es lo que el sync lee, las une por
+ * `person_code`. Subir el de un país no altera a las personas del otro -- la
+ * vista calcula "sigue activa" contra el ÚLTIMO LOTE DE SU PROPIO PAÍS.
+ *
+ * LO QUE ESTO NO ARREGLA: sólo acelera lo que se sube por esta app. Si el dato
+ * que falta viene de Salesforce -- una oportunidad, un realtor, una estrategia
+ * -- hay que esperar igual al transfer de la 1:03 AM, que no controlamos.
+ * Correr el sync antes de eso no lo adelanta: leería de BigQuery lo mismo que ya
+ * está.
  */
-const SYNC_AFTER_UPLOAD = new Set(['encompass', 'pipeline']);
+const SYNC_AFTER_UPLOAD = new Set(['encompass', 'pipeline', 'roster_co', 'roster_us']);
 
 /** Cuánto se espera para poder CONTAR qué pasó. El sync sigue si no contesta. */
 const SYNC_CONFIRM_MS = 5_000;
