@@ -259,9 +259,23 @@ const SYNCS: TableSync[] = [
     // is_nppm_referred / nppm_tipo / referred_by_nppm.
     //
     // Se descartan del view (EXCEPT) las dos columnas malas y se traen las
-    // correctas por LEFT JOIN. COALESCE cubre keys del mapa que no estén en el
-    // dim: por defecto B2B / no-NPPM. El dim es un row por realtor_key, así que
-    // el JOIN no cambia el grano ya colapsado.
+    // correctas del dim. COALESCE deja en B2B / no-NPPM a las keys sin fila en
+    // el dim (caso general).
+    //
+    // ⚠ FULL OUTER, no LEFT JOIN, y esto importa. Un realtor puede escribirse de
+    // varias formas y cada tabla usa la suya: Daniella Ottone es 'daniela ottone'
+    // en realtor_owner_map pero 'daniella ottone' (doble L) en fct_leads, donde
+    // están sus 2.743 leads (la realtor NPPM de más volumen). El dim ahora emite
+    // UNA FILA POR GRAFÍA (por eso pasó de 3.897 a ~4.024 claves): incluye las
+    // grafías que solo viven en fct_leads/fct_opportunities. Con LEFT JOIN desde
+    // el mapa esas grafías se perderían (el output quedaría keyado por el mapa) y
+    // los leads de la grafía huérfana nunca cruzarían -> se contarían B2B. El
+    // FULL OUTER une las claves de los dos lados: las del mapa traen owner/fechas,
+    // las que solo están en el dim llegan con esas columnas en null (todas
+    // nullable salvo realtor_key/synced_at, que tiene default) pero con su
+    // strategy, para que leads/opps de cualquier grafía encuentren su estrategia.
+    // El dim se deduplica por realtor_key (QUALIFY) por si una grafía se repite:
+    // dos filas con la misma conflict key romperían el batch, igual que el mapa.
     //
     // TRANSICIÓN de la columna `nppm`: la app en vivo (MetricsHomesi) todavía
     // lee realtor_owner_map_v2.nppm para el chip NPPM de Meetings. Para no
@@ -275,7 +289,18 @@ const SYNCS: TableSync[] = [
     conflict: 'realtor_key',
     query: `
       SELECT
-        m.* EXCEPT(rn, nppm, strategy),
+        COALESCE(m.realtor_key, s.realtor_key) AS realtor_key,
+        m.realtor_name,
+        m.owner,
+        m.meeting_attended_date,
+        m.invite_sent_date,
+        m.last_referral_date,
+        m.branch,
+        m.loan_officers,
+        m.opportunity_record_type,
+        m.stage,
+        m.created_date,
+        m.recruitment_role,
         COALESCE(s.strategy, 'B2B')            AS strategy,
         COALESCE(s.is_nppm_contracted, FALSE)  AS is_nppm_contracted,
         COALESCE(s.is_nppm_referred, FALSE)    AS is_nppm_referred,
@@ -283,18 +308,28 @@ const SYNCS: TableSync[] = [
         s.referred_by_nppm                     AS referred_by_nppm,
         COALESCE(s.is_nppm_contracted, FALSE)  AS nppm
       FROM (
-        SELECT *, ROW_NUMBER() OVER (
-          PARTITION BY realtor_key
-          ORDER BY created_date DESC NULLS LAST,
-                   meeting_attended_date DESC NULLS LAST,
-                   invite_sent_date DESC NULLS LAST,
-                   last_referral_date DESC NULLS LAST,
-                   owner ASC
-        ) AS rn
-        FROM \`app_b2b_metrics.realtor_owner_map\`
+        SELECT * EXCEPT(rn) FROM (
+          SELECT * EXCEPT(nppm, strategy), ROW_NUMBER() OVER (
+            PARTITION BY realtor_key
+            ORDER BY created_date DESC NULLS LAST,
+                     meeting_attended_date DESC NULLS LAST,
+                     invite_sent_date DESC NULLS LAST,
+                     last_referral_date DESC NULLS LAST,
+                     owner ASC
+          ) AS rn
+          FROM \`app_b2b_metrics.realtor_owner_map\`
+        ) WHERE rn = 1
       ) m
-      LEFT JOIN \`b2b_marts.dim_realtor_strategy\` s USING (realtor_key)
-      WHERE m.rn = 1
+      FULL OUTER JOIN (
+        SELECT realtor_key, strategy, is_nppm_contracted,
+               is_nppm_referred, nppm_tipo, referred_by_nppm
+        FROM \`b2b_marts.dim_realtor_strategy\`
+        QUALIFY ROW_NUMBER() OVER (
+          PARTITION BY realtor_key
+          ORDER BY is_nppm_contracted DESC, is_nppm_referred DESC, nppm_tipo
+        ) = 1
+      ) s
+      ON m.realtor_key = s.realtor_key
     `,
   },
   {
