@@ -443,6 +443,18 @@ const SYNCS: TableSync[] = [
       'supervisor',
       'supreme_email',
       'is_active',
+      /*
+       * Si `is_active` salió del archivo de RRHH o de una decisión a mano.
+       *
+       * Sin esto las dos se ven igual, y la diferencia es la que explica los
+       * casos raros: Isabel Wagner y Ludwig Aguillon aparecen en el roster
+       * porque el archivo los trae, pero están de baja. Con esta columna la
+       * pantalla puede decir cuál de las dos cosas está mirando en vez de
+       * mostrar un "activo" que nadie sabe de dónde salió.
+       *
+       * Gemela de `producer_set_by_hand`, más abajo, y por el mismo motivo.
+       */
+      'active_set_by_hand',
       'source_kind',
       'has_override',
       'date_started',
