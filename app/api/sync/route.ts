@@ -443,6 +443,18 @@ const SYNCS: TableSync[] = [
       'supervisor',
       'supreme_email',
       'is_active',
+      /*
+       * Si `is_active` salió del archivo de RRHH o de una decisión a mano.
+       *
+       * Sin esto las dos se ven igual, y la diferencia es la que explica los
+       * casos raros: Isabel Wagner y Ludwig Aguillon aparecen en el roster
+       * porque el archivo los trae, pero están de baja. Con esta columna la
+       * pantalla puede decir cuál de las dos cosas está mirando en vez de
+       * mostrar un "activo" que nadie sabe de dónde salió.
+       *
+       * Gemela de `producer_set_by_hand`, más abajo, y por el mismo motivo.
+       */
+      'active_set_by_hand',
       'source_kind',
       'has_override',
       'date_started',
@@ -464,6 +476,31 @@ const SYNCS: TableSync[] = [
        */
       'branch_is_active',
       'branch_note',
+      /*
+       * QUIÉN PRODUCE. Es lo que Business Plan y Outlook necesitan para saber
+       * quién es Loan Officer, y lo que hoy deducen del cargo por su cuenta.
+       *
+       * ⚠ NO SE DERIVA DE LOS CIERRES, ni acá ni en la vista. Un Loan Officer
+       * nuevo sin cierres todavía produce, y hay un NonProducing Branch Manager
+       * con cero cierres que igual cuenta. La producción CONFIRMA la regla, no
+       * la define -- derivarla de los cierres daría un roster que cambia solo
+       * cada vez que alguien cierra su primer préstamo.
+       *
+       * La vista la saca del cargo y admite override por persona, porque el
+       * cargo se equivoca en las dos direcciones: hay Production Managers que
+       * producen y hay 'LO ASSISTANT' que sí y otros que no, con el mismo
+       * título. `producer_set_by_hand` es lo que distingue "lo dice el cargo" de
+       * "alguien lo decidió", y sin esa columna las dos se ven igual.
+       */
+      'is_producer',
+      'producer_set_by_hand',
+      /*
+       * Está en el roster Y es realtor NPPM contratado: 7 personas. Su volumen
+       * va a la estrategia NPPM del branch, así que el portal tiene que
+       * listarlas en el desglose de estrategia y NO entre los Loan Officers.
+       * Contarlas en los dos lados duplicaría el volumen del branch.
+       */
+      'is_nppm_realtor',
     ].join(', '),
   },
 ];
