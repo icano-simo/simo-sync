@@ -247,12 +247,42 @@ const SYNCS: TableSync[] = [
     // two more dates, then `owner` alphabetically. Alphabetical owner is
     // arbitrary as business logic but STABLE, which is the property that
     // matters -- a realtor lands on the same BD every run.
+    //
+    // ESTRATEGIA NPPM vs B2B. Las columnas `nppm` y `strategy` que trae el view
+    // app_b2b_metrics.realtor_owner_map están mal: `nppm` marca 73 (cualquiera
+    // con la casilla NPPM__c, sin exigir contratación) y `strategy` dice
+    // 'B2B Strategy' en 64 de esos 73, contradiciéndose. La fuente correcta es
+    // b2b_marts.dim_realtor_strategy (grano realtor_key, verificado 1-a-1), que
+    // resuelve los 30 reales = 14 contratados (NPPM__c con StageName='Closed
+    // Won') + 16 referidos (opp con Referred_By apuntando a un contratado; NO
+    // llevan Closed Won). De ahí salen strategy / is_nppm_contracted /
+    // is_nppm_referred / nppm_tipo / referred_by_nppm.
+    //
+    // Se descartan del view (EXCEPT) las dos columnas malas y se traen las
+    // correctas por LEFT JOIN. COALESCE cubre keys del mapa que no estén en el
+    // dim: por defecto B2B / no-NPPM. El dim es un row por realtor_key, así que
+    // el JOIN no cambia el grano ya colapsado.
+    //
+    // TRANSICIÓN de la columna `nppm`: la app en vivo (MetricsHomesi) todavía
+    // lee realtor_owner_map_v2.nppm para el chip NPPM de Meetings. Para no
+    // romperla y a la vez dejar de mentir, `nppm` se sigue escribiendo pero
+    // ahora = is_nppm_contracted (baja de 73 a 14, que es lo correcto). Cuando
+    // la app migre a is_nppm_contracted se elimina la columna `nppm` en un
+    // cambio aparte. `strategy` conserva el nombre; solo cambian sus valores.
     name: 'realtor_owner_map',
     source: 'app_b2b_metrics.realtor_owner_map',
     target: 'realtor_owner_map_v2',
     conflict: 'realtor_key',
     query: `
-      SELECT * EXCEPT(rn) FROM (
+      SELECT
+        m.* EXCEPT(rn, nppm, strategy),
+        COALESCE(s.strategy, 'B2B')            AS strategy,
+        COALESCE(s.is_nppm_contracted, FALSE)  AS is_nppm_contracted,
+        COALESCE(s.is_nppm_referred, FALSE)    AS is_nppm_referred,
+        s.nppm_tipo                            AS nppm_tipo,
+        s.referred_by_nppm                     AS referred_by_nppm,
+        COALESCE(s.is_nppm_contracted, FALSE)  AS nppm
+      FROM (
         SELECT *, ROW_NUMBER() OVER (
           PARTITION BY realtor_key
           ORDER BY created_date DESC NULLS LAST,
@@ -262,7 +292,9 @@ const SYNCS: TableSync[] = [
                    owner ASC
         ) AS rn
         FROM \`app_b2b_metrics.realtor_owner_map\`
-      ) WHERE rn = 1
+      ) m
+      LEFT JOIN \`b2b_marts.dim_realtor_strategy\` s USING (realtor_key)
+      WHERE m.rn = 1
     `,
   },
   {
