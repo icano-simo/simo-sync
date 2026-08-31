@@ -381,6 +381,22 @@ const SYNCS: TableSync[] = [
       'date_started',
       'first_seen_at',
       'last_seen_at',
+      /*
+       * Estado de la SUCURSAL, que no es el estado de la persona. Viajan en la
+       * misma fila porque la pantalla de Admin agrupa por sucursal y necesita
+       * las dos cosas, pero son independientes: hoy Robert Kravitz está activo
+       * en la 709, que no lo está.
+       *
+       * `branch_is_active` no se deriva de la actividad -- es una decisión de
+       * la usuaria, 15 sucursales de 27. Una cerrada puede tener préstamos en
+       * vuelo y una nueva puede estar activa sin producir todavía.
+       *
+       * La vista hace COALESCE(b.is_active, FALSE), así que un `branch_code`
+       * que no existe en `dim_branch_status` llega como inactivo y sin nota.
+       * Es lo que pasa con el dato malo '700 - 707' (dos códigos en un campo).
+       */
+      'branch_is_active',
+      'branch_note',
     ].join(', '),
   },
 ];
