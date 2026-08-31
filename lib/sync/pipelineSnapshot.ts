@@ -25,6 +25,13 @@ import { getSupabaseClient } from '@/lib/supabase-admin';
  * día que trae el lote, y hay un tope de seguridad: si ese día tuviera más
  * snapshots de los que puede tener, se aborta antes de borrar nada. Los 22
  * históricos no se pueden regenerar desde ningún lado.
+ *
+ * UN SOLO SNAPSHOT ACTIVO, y lo impone la base: el índice único parcial
+ * `uniq_pipeline_snapshot_active` permite una única fila con `is_active`. Por eso
+ * el snapshot se inserta APAGADO y se prende al final, después de sus hijos --
+ * ver el paso 3. Insertarlo ya activo funciona sólo cuando el borrado del día
+ * liberó el índice, que es por qué este job corrió tres días antes de fallar en
+ * el primer día nuevo.
  */
 
 const BATCH_SIZE = 500;
@@ -114,7 +121,7 @@ export type PipelineSyncResult = {
   adverse: number;
   snapshots_reemplazados: number;
   /** Conteos releídos del servidor, no lo que creímos escribir. */
-  verificado: { loans: number | null; resolved: number | null } | null;
+  verificado: { loans: number | null; resolved: number | null; activos: number | null } | null;
   coincide: boolean;
   omitido: string | null;
 };
@@ -207,6 +214,30 @@ export async function syncPipelineSnapshot(
    * día -- coinciden dentro del mismo día; para un export viejo subido después,
    * no. Si eso importa, hay que llevar el nombre del archivo hasta el stage.
    */
+  /*
+   * ⚠ SE INSERTA is_active: false, Y SE ACTIVA AL FINAL. El orden no es
+   * cosmético.
+   *
+   * Hay un índice único parcial que permite UNA sola fila activa en toda la
+   * tabla:
+   *
+   *   CREATE UNIQUE INDEX uniq_pipeline_snapshot_active
+   *     ON pipeline_forecast.pipeline_snapshots (is_active) WHERE is_active
+   *
+   * Insertar el nuevo ya activo choca con el anterior, que todavía lo está.
+   * Este job vivió tres días sin que se notara porque el snapshot del día ya
+   * existía y se reemplazaba: borrarlo liberaba el índice justo antes del
+   * insert. El primer DÍA NUEVO --el 31, con el del 28 todavía activo-- falló.
+   *
+   * Se activa DESPUÉS de escribir los hijos, no antes: así la app nunca ve un
+   * snapshot vigente con cero préstamos adentro.
+   *
+   * Si algo se cae en el medio, queda un instante --o un rato, si falla-- sin
+   * ningún snapshot activo. Es el lado seguro en el que fallar: sin activo la
+   * app no muestra datos y se nota; con dos activos mostraría cualquiera de los
+   * dos sin avisar. El índice, además, es lo que hizo que este bug apareciera
+   * como un error en vez de como dos snapshots vigentes en silencio.
+   */
   const { data: inserted, error: insertError } = await sb
     .from('pipeline_snapshots')
     .insert({
@@ -215,7 +246,7 @@ export async function syncPipelineSnapshot(
       snapshot_date: snapshotDate,
       data_as_of: uploadedAt,
       data_as_of_source: 'bigquery_batch',
-      is_active: true,
+      is_active: false,
     })
     .select('id')
     .single();
@@ -287,12 +318,22 @@ export async function syncPipelineSnapshot(
   await insertInBatches(sb, 'pipeline_loans', loans);
   await insertInBatches(sb, 'pipeline_resolved_loans', resolved);
 
-  // ---- 5. Un solo snapshot activo --------------------------------------
+  // ---- 5. Un solo snapshot activo, en dos pasos y en este orden ---------
   /*
-   * ESTE ES EL ÚNICO ESCRITO QUE TOCA FILAS DE OTROS DÍAS, y toca un booleano,
-   * nunca un dato. El parser del navegador hacía lo mismo: hoy hay exactamente
-   * un `is_active = true` en toda la tabla, el del día más reciente. Sin esto
-   * quedarían dos activos y "el snapshot actual" pasa a ser ambiguo para la app.
+   * APAGAR PRIMERO, PRENDER DESPUÉS. Al revés habría dos activos por un instante
+   * y el índice único parcial rechazaría el segundo -- que es exactamente el bug
+   * que este orden arregla.
+   *
+   * Son dos statements y no uno porque PostgREST no expone transacciones: cada
+   * llamada es su propio commit. Entre las dos la tabla queda sin ningún
+   * snapshot activo. Es a propósito: el hueco es de milisegundos y sin activo la
+   * app no muestra datos --se nota--, mientras que con dos mostraría uno de los
+   * dos al azar. Si hiciera falta que sea atómico, hay que envolverlo en una
+   * función de Postgres y llamarla por RPC.
+   *
+   * El primer UPDATE toca filas de OTROS DÍAS: es el único de este job que lo
+   * hace, y toca un booleano de control, nunca un dato. El parser del navegador
+   * hacía lo mismo.
    */
   const { error: deactivateError } = await sb
     .from('pipeline_snapshots')
@@ -304,9 +345,42 @@ export async function syncPipelineSnapshot(
     throw new Error(`clearing is_active failed: ${deactivateError.message}`);
   }
 
+  const { error: activateError } = await sb
+    .from('pipeline_snapshots')
+    .update({ is_active: true })
+    .eq('id', snapshotId);
+
+  if (activateError) {
+    /*
+     * Los datos están escritos y no hay ningún snapshot activo. Se dice así,
+     * completo: el mensaje tiene que distinguir "no se cargó nada" de "se cargó
+     * todo pero nadie lo ve", porque la segunda se arregla con un UPDATE de una
+     * línea y la primera no.
+     */
+    throw new Error(
+      `snapshot ${snapshotId} for ${snapshotDate} was written with its loans but could ` +
+        `not be activated (${activateError.message}); no snapshot is active right now`,
+    );
+  }
+
   // ---- 6. Verificar releyendo ------------------------------------------
   const loansCount = await countFor(sb, 'pipeline_loans', snapshotId);
   const resolvedCount = await countFor(sb, 'pipeline_resolved_loans', snapshotId);
+
+  /*
+   * Cuántos snapshots quedaron activos. El índice garantiza que no haya DOS,
+   * así que lo que esto detecta es el CERO: los dos updates de arriba son dos
+   * commits, y si el segundo no llegó a aplicarse los datos quedan cargados y
+   * invisibles. Sin esta lectura, la corrida se reportaría como correcta.
+   */
+  const { count: activos, error: activeError } = await sb
+    .from('pipeline_snapshots')
+    .select('*', { count: 'exact', head: true })
+    .eq('is_active', true);
+
+  if (activeError) {
+    throw new Error(`counting active snapshots failed: ${activeError.message}`);
+  }
 
   const funded = resolved.filter((r) => r.status === 'funded').length;
 
@@ -319,8 +393,9 @@ export async function syncPipelineSnapshot(
     funded,
     adverse: resolved.length - funded,
     snapshots_reemplazados: aBorrar.length,
-    verificado: { loans: loansCount, resolved: resolvedCount },
-    coincide: loansCount === loans.length && resolvedCount === resolved.length,
+    verificado: { loans: loansCount, resolved: resolvedCount, activos: activos ?? null },
+    coincide:
+      loansCount === loans.length && resolvedCount === resolved.length && activos === 1,
     omitido: null,
   };
 }
