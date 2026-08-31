@@ -135,7 +135,14 @@ export async function parseXlsx(
   const sheet = sheetName ? workbook.getWorksheet(sheetName) : workbook.worksheets[0];
 
   if (!sheet) {
-    const available = workbook.worksheets.map((w) => w.name).join(', ');
+    /*
+     * Los nombres van ENTRE COMILLAS, y no es cosmético: ' Forecast' y
+     * 'Forecast' se leen idénticos en un log sin ellas. El 31 de agosto eso
+     * costó tres intentos fallidos seguidos antes de que alguien notara que la
+     * pestaña traía un espacio adelante -- el mensaje decía la verdad y era
+     * ilegible igual.
+     */
+    const available = workbook.worksheets.map((w) => `"${w.name}"`).join(', ');
     throw new Error(`sheet "${sheetName}" not found in workbook; available: ${available}`);
   }
 

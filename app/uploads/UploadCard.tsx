@@ -22,6 +22,16 @@ export type LoadEntry = {
   rows_loaded: number | null;
   status: 'ok' | 'validation_failed' | 'error' | string;
   error_message: string | null;
+  /**
+   * Cómo terminó el sync que disparó esta carga. `null` = no se disparó
+   * ninguno: la fuente no alimenta una tabla sincronizada, o la carga falló.
+   *
+   * Existe porque la respuesta de la carga casi nunca alcanza a saberlo -- el
+   * sync tarda ~31 segundos y la carga espera 5. Sin esta columna, un sync
+   * fallido sólo quedaba en el log de Vercel.
+   */
+  sync_status: 'ok' | 'error' | null;
+  sync_error: string | null;
 };
 
 type Result =
@@ -86,6 +96,33 @@ function syncMessage(sync: SyncInfo | undefined, sourceKey: string): string | nu
     return `Los datos ya están en BigQuery. ${app} se actualiza en la corrida de las 08:00 UTC.`;
   }
   return null;
+}
+
+/**
+ * La celda "Sync" del historial: cómo terminó el sync de esa carga.
+ *
+ * Es lo que hace que un sync fallido deje de ser invisible. La respuesta de la
+ * carga casi nunca alcanza a saberlo --el sync tarda ~31 segundos y la carga
+ * espera 5-- así que este historial es el lugar donde el resultado aparece,
+ * la próxima vez que alguien abre la pantalla.
+ *
+ * `—` cubre dos casos que no conviene distinguir acá: la fuente no alimenta
+ * ninguna tabla sincronizada, o el sync todavía está corriendo. Los dos
+ * significan "no hay nada que reportar todavía", y una carga que acaba de pasar
+ * muestra `—` por unos segundos hasta que el sync termina.
+ */
+function syncCell(entry: LoadEntry) {
+  if (entry.sync_status === 'ok') return <span className="pill pill--ok">ok</span>;
+  if (entry.sync_status === 'error') {
+    // El mensaje va en el title y no en la celda: es largo (trae el JSON del
+    // sync) y la tabla tiene que seguir siendo legible de un vistazo.
+    return (
+      <span className="pill pill--err" title={entry.sync_error ?? undefined}>
+        falló
+      </span>
+    );
+  }
+  return <span className="loads__empty">—</span>;
 }
 
 export default function UploadCard({ source, recent }: { source: SourceRow; recent: LoadEntry[] }) {
@@ -252,12 +289,18 @@ export default function UploadCard({ source, recent }: { source: SourceRow; rece
               <th>Archivo</th>
               <th>Filas</th>
               <th>Estado</th>
+              {/*
+                El estado del SYNC, aparte del de la carga. Son dos cosas
+                distintas: la carga puede estar perfecta y el sync haber
+                fallado, que es exactamente lo que pasó el 31 de agosto.
+              */}
+              <th>Sync</th>
             </tr>
           </thead>
           <tbody>
             {recent.length === 0 ? (
               <tr>
-                <td colSpan={4} className="loads__empty">
+                <td colSpan={5} className="loads__empty">
                   Sin cargas todavía.
                 </td>
               </tr>
@@ -275,6 +318,7 @@ export default function UploadCard({ source, recent }: { source: SourceRow; rece
                     <td>
                       <span className={style.className}>{style.label}</span>
                     </td>
+                    <td>{syncCell(entry)}</td>
                   </tr>
                 );
               })

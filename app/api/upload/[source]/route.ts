@@ -22,6 +22,8 @@ import type { User } from '@supabase/supabase-js';
 import { getSessionUser } from '@/lib/auth/session';
 import { hasAppAccess } from '@/lib/auth/appAccess';
 import { getServerClient } from '@/lib/supabase/server';
+// Sólo para completar el resultado del sync en load_log; ver recordSyncOutcome.
+import { getSupabaseClient as getAdminUploadsClient } from '@/lib/supabase-admin';
 import { getBigQueryWriterClient, assertWritableDataset } from '@/lib/bigquery-writer';
 import { getSourceRules, hasSourceRules, type SourceRules } from '@/lib/uploads/sources';
 import { parseXlsx, parseCsv, dropColumns, type ParsedFile } from '@/lib/uploads/parse';
@@ -150,7 +152,12 @@ type SourceConfig = {
 
 type LogStatus = 'ok' | 'validation_failed' | 'error';
 
-/** Deja constancia del intento. Nunca hace fallar la respuesta. */
+/**
+ * Deja constancia del intento. Nunca hace fallar la respuesta.
+ *
+ * Devuelve el id de la fila para poder completarle después el resultado del
+ * sync -- ver `recordSyncOutcome`. `null` si no se pudo registrar.
+ */
 async function writeLog(
   sb: Awaited<ReturnType<typeof getServerClient>>,
   entry: {
@@ -161,13 +168,56 @@ async function writeLog(
     status: LogStatus;
     error_message: string | null;
   },
-): Promise<void> {
-  const { error } = await sb.from('load_log').insert(entry);
+): Promise<number | null> {
+  const { data, error } = await sb.from('load_log').insert(entry).select('id').single();
   if (error) {
     // Si no se pudo registrar, se avisa por log del servidor pero no se
     // convierte en el error que ve el usuario: la carga ya ocurrió (o ya
     // falló) y ese resultado es más importante que su bitácora.
     console.error(`[upload] could not write load_log: ${error.message}`);
+    return null;
+  }
+  return (data as { id: number } | null)?.id ?? null;
+}
+
+/**
+ * Guarda en `load_log` cómo terminó el sync que disparó esta carga.
+ *
+ * ⚠ POR QUÉ CON service_role Y NO CON LA SESIÓN DEL USUARIO. Dos razones, y
+ * cualquiera de las dos alcanza:
+ *
+ *  1. `load_log` no tiene política de UPDATE para `authenticated` -- sólo
+ *     INSERT y SELECT. Con la sesión, este update afectaría CERO filas y no
+ *     devolvería error: RLS filtra, no rechaza. Sería exactamente el fallo
+ *     silencioso que esta función viene a eliminar. Y agregar esa política le
+ *     daría a la usuaria permiso para reescribir su propia bitácora, que es
+ *     justo lo que no se quiere de una bitácora.
+ *  2. Esto corre dentro de `after()`, con la respuesta ya enviada. Depender de
+ *     leer la cookie de sesión en ese momento es frágil; el service_role no
+ *     depende de nadie.
+ *
+ * Nunca lanza: llega después de que la carga ya se reportó y no hay a quién
+ * avisarle salvo el log del servidor.
+ */
+async function recordSyncOutcome(logId: number, result: SyncTrigger): Promise<void> {
+  try {
+    const { error } = await getAdminUploadsClient('uploads')
+      .from('load_log')
+      .update({
+        sync_status: result.ok ? 'ok' : 'error',
+        sync_error: result.ok ? null : result.error,
+        sync_finished_at: new Date().toISOString(),
+      })
+      .eq('id', logId);
+
+    if (error) {
+      console.error(`[upload] could not record sync outcome on load_log ${logId}: ${error.message}`);
+    }
+  } catch (err) {
+    console.error(
+      `[upload] could not record sync outcome on load_log ${logId}: ` +
+        (err instanceof Error ? err.message : String(err)),
+    );
   }
 }
 
@@ -540,7 +590,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
     // el del archivo parseado.
     const matches = rowsInTable === toLoad.rows.length;
 
-    await writeLog(sb, {
+    // El id de ESTA fila es lo que después completa `recordSyncOutcome`.
+    const logId = await writeLog(sb, {
       source_key: sourceKey,
       user_email: userEmail,
       file_name: fileName,
@@ -561,10 +612,21 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
      * respuesta ya se haya ido. Sin eso, en serverless la función puede quedar
      * congelada al responder y cortar el fetch a mitad de camino.
      *
-     * Y se corre igual una carrera contra SYNC_CONFIRM_MS para poder decir en la
-     * respuesta qué pasó: si el sync contesta rápido, el usuario se entera acá
-     * mismo; si no, se le dice que quedó disparado y sigue. Nunca se lo hace
-     * esperar los ~20 segundos completos.
+     * Y se corre igual una carrera contra SYNC_CONFIRM_MS para poder decir algo
+     * en la respuesta. Pero esa carrera casi nunca la gana el sync: tarda ~31
+     * segundos y la espera es de 5, así que la tarjeta dice "actualizando" y
+     * después nadie vuelve a enterarse.
+     *
+     * POR ESO EL RESULTADO SE GUARDA EN `load_log`, y no sólo se reporta. Que un
+     * sync fallido no haga fallar la carga es correcto -- el archivo ya está en
+     * BigQuery -- pero "no falla la carga" no puede significar "nadie se entera".
+     * El 31 de agosto un sync falló a las 14:08, volvió a fallar a las 14:11, y
+     * el error vivió tres horas sólo en el log de Vercel mientras alguien subía
+     * el archivo creyendo que el dato se refrescaba. Con esto, el historial de
+     * la tarjeta lo muestra la próxima vez que alguien la abre.
+     *
+     * Alargar la espera no es la solución: 31 segundos parado frente a una carga
+     * que ya terminó es peor que enterarse después.
      */
     let sync: SyncTrigger = { disparado: false, confirmado: false, ok: null, error: null };
 
@@ -581,14 +643,15 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
         };
         console.error('[upload] cannot trigger sync: CRON_SECRET is not set');
       } else {
-        const running = triggerSync(req.nextUrl.origin, secret).then((result) => {
-          // El log del servidor es el único registro duradero de esto: la
-          // respuesta se la lleva el navegador y `load_log` ya se escribió.
+        const running = triggerSync(req.nextUrl.origin, secret).then(async (result) => {
           if (!result.ok) {
             console.error(`[upload] sync after ${sourceKey} failed: ${result.error}`);
           } else {
             console.log(`[upload] sync after ${sourceKey} completed`);
           }
+          // El log del servidor sirve para investigar; la fila de `load_log` es
+          // lo que ve la usuaria sin salir de la app. Se escriben las dos.
+          if (logId !== null) await recordSyncOutcome(logId, result);
           return result;
         });
 

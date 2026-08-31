@@ -73,6 +73,37 @@ create table if not exists uploads.load_log (
 );
 
 -- La UI pide las últimas 5 por fuente, siempre ordenadas por fecha descendente.
+-- ---------------------------------------------------------------------------
+-- El resultado del sync que dispara la carga
+-- ---------------------------------------------------------------------------
+-- Se agregan despues, sobre la tabla que ya existe en produccion.
+--
+-- POR QUE HACEN FALTA: la carga dispara /api/sync y espera 5 segundos para
+-- poder contar que paso, pero el sync tarda ~31. O sea que la tarjeta casi
+-- siempre dice "actualizando" y el resultado real -- incluido el fallo -- queda
+-- solo en el log de Vercel. El 31 de agosto eso dejo un error tres horas sin
+-- que nadie se enterara, mientras alguien subia el archivo creyendo que el
+-- dato se habia refrescado.
+--
+-- OJO -- ESTO INTRODUCE UN UPDATE EN UNA TABLA QUE ERA APPEND-ONLY. Es el unico
+-- que hay, toca solo estas tres columnas, y lo hace el servidor con
+-- service_role: no hay politica de UPDATE para `authenticated`, asi que la
+-- usuaria sigue sin poder reescribir su propia bitacora. Lo que se escribe acá
+-- no reemplaza nada: completa un dato que al momento del INSERT todavia no se
+-- conocia.
+--
+-- alter table uploads.load_log
+--     add column if not exists sync_status      text,
+--     add column if not exists sync_error       text,
+--     add column if not exists sync_finished_at timestamptz;
+--
+-- comment on column uploads.load_log.sync_status is
+--     'ok | error. NULL = no se disparo ningun sync para esta carga (la fuente no alimenta una tabla sincronizada, o la carga no fue exitosa).';
+-- comment on column uploads.load_log.sync_error is
+--     'El mensaje del sync cuando fallo. NULL cuando salio bien o no se disparo.';
+-- comment on column uploads.load_log.sync_finished_at is
+--     'Cuando termino el sync. Puede ser bastante despues de uploaded_at: la respuesta de la carga no lo espera.';
+
 create index if not exists load_log_source_uploaded_idx
     on uploads.load_log (source_key, uploaded_at desc);
 
