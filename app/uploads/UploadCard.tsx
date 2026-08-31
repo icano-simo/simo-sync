@@ -55,6 +55,10 @@ type SyncInfo = {
 const APP_POR_FUENTE: Record<string, string> = {
   encompass: 'Commercial Activity',
   pipeline: 'Forecast & Pipeline',
+  // Los dos rosters terminan en la misma tabla y se miran en la misma pantalla,
+  // así que dicen lo mismo aunque suban archivos distintos.
+  roster_co: 'Admin',
+  roster_us: 'Admin',
 };
 
 /**
