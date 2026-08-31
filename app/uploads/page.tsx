@@ -36,7 +36,16 @@ export default async function UploadsPage() {
   // reparten en memoria: una consulta por tarjeta sería N+1 sin ninguna ventaja.
   const { data: logs } = await sb
     .from('load_log')
-    .select('id, source_key, uploaded_at, file_name, rows_loaded, status, error_message')
+    /*
+     * `*` y no la lista de columnas, a propósito. `sync_status` y `sync_error`
+     * se agregan a `load_log` por ALTER, y con la lista explícita esta consulta
+     * falla mientras la columna no exista -- y falla EN SILENCIO: el error no se
+     * muestra y el historial se ve vacío, indistinguible de "no hay cargas".
+     * Con `*` la pantalla funciona antes y después del ALTER, y las columnas
+     * nuevas simplemente aparecen cuando existen. La tabla tiene diez columnas;
+     * no hay nada que ahorrar acotándolas.
+     */
+    .select('*')
     .order('uploaded_at', { ascending: false })
     .limit(100);
 
