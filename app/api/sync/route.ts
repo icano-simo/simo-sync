@@ -7,9 +7,10 @@
  * never used: an upsert leaves no window where the table is empty, which
  * matters because these tables are read by live apps.
  *
- * Seven tables across three schemas -- b2b_metrics (Salesforce),
- * activity_report (Encompass + Salesforce) y org (roster de RRHH). El snapshot
- * de pipeline, que corre aparte al final, es el octavo destino.
+ * Eight tables across three schemas -- b2b_metrics (Salesforce),
+ * activity_report (Encompass + Salesforce, más el pipeline de reclutamiento) y
+ * org (roster de RRHH). El snapshot de pipeline, que corre aparte al final y no
+ * usa `syncTable`, es el noveno destino.
  *
  * Order of operations is deliberate:
  *   1. authorize  2. freshness gate  3. write  4. sweep  5. verify by counting
@@ -81,10 +82,21 @@ const SWEEPABLE = new Set([
   'b2b_metrics.realtor_owner_map_v2',
   'activity_report.loan_records_v2',
   /*
+   * Espejo de Salesforce como leads y opportunities: nada de lo que hay acá lo
+   * escribe una persona, así que una fila que desaparece arriba es una
+   * oportunidad borrada y no una decisión que haya que conservar. Es lo que
+   * separa este caso del roster, dos párrafos más abajo.
+   *
+   * Sin el sweep, una oportunidad borrada en Salesforce se quedaría acá para
+   * siempre Y haría que el conteo no coincida, con lo cual la corrida ENTERA
+   * fallaría todos los días hasta que alguien borrara la fila a mano.
+   */
+  'activity_report.lo_recruitment',
+  /*
    * ⚠ `org.roster_current` NO ESTÁ ACÁ, Y NO ES UN OLVIDO.
    *
    * El sweep borra las filas que no volvieron a aparecer arriba. Para las otras
-   * seis tablas eso es exactamente lo que se quiere: son espejos de su fuente.
+   * siete tablas eso es exactamente lo que se quiere: son espejos de su fuente.
    * Para el roster, borrar a quien desapareció del archivo choca con dos cosas
    * que ya están decididas:
    *
@@ -517,6 +529,93 @@ const SYNCS: TableSync[] = [
        * Contarlas en los dos lados duplicaría el volumen del branch.
        */
       'is_nppm_realtor',
+    ].join(', '),
+  },
+  {
+    /*
+     * ========================================================================
+     * RECLUTAMIENTO DE LOAN OFFICERS
+     * ========================================================================
+     *
+     * El tercer pipeline de Salesforce que entra al job: los otros dos son
+     * préstamos (`opportunities`) y realtors (`realtor_owner_map`). 233
+     * candidatos, 26 columnas, todas con el mismo nombre de los dos lados.
+     *
+     * Verificado antes de escribir esto: 233 filas, 233 `recruitment_id`
+     * distintos, ninguno nulo. Sirve como clave de conflicto.
+     *
+     * ⚠ LAS FECHAS DE ETAPA NO MIDEN TIEMPOS DE CICLO, y es la trampa más
+     * probable de esta tabla. El conector no trae OpportunityHistory ni
+     * OpportunityFieldHistory, así que no existe registro de cuándo un
+     * candidato entró a una etapa. Lo único que hay son tres campos que alguien
+     * llena a mano, y están llenos en menos de un tercio:
+     *
+     *   qualification_date   69 de 233
+     *   proposal_date        62
+     *   negotiation_date     59
+     *
+     * Una fecha ausente NO significa que la etapa no se alcanzó: significa que
+     * nadie llenó el campo. Un "promedio de días entre etapas" calculado sobre
+     * esto mide el hábito de carga de datos, no el proceso.
+     *
+     * ⚠ PARA "CUÁNTO LLEVA ABIERTO" VA `dias_abierto`, que la vista calcula
+     * desde `created_date`. Está en 106 de 233 y eso es correcto, no un campo a
+     * medio llenar: la vista lo deja en NULL para los cerrados, y 106 es
+     * exactamente la cantidad de abiertos.
+     *
+     * ⚠ LA FECHA DE CONTRATACIÓN ES `close_date`, NO `date_of_hire`.
+     * `date_of_hire` está en 4 de 233 -- nadie lo llena al contratar.
+     * `close_date` está en las 233, y ninguno de los 39 contratados la tiene
+     * vacía.
+     *
+     * Otras dos casi vacías, para saberlo antes de construir encima:
+     * `licensed_states` (2 de 233) y `loan_volume_14m` (18, de los cuales 16
+     * son de los contratados).
+     *
+     * LA EMPRESA DEL CANDIDATO NO ESTÁ. No está en
+     * `Broker_Company_Encompass__c` ni en `Referred_By_Company__c`: las dos
+     * vienen vacías en las 233. Dónde se registra, si se registra, es una
+     * pregunta abierta -- no hay que inventarle un campo.
+     */
+    name: 'lo_recruitment',
+    source: 'lending_marts.fct_lo_recruitment',
+    target: 'lo_recruitment',
+    schema: 'activity_report',
+    conflict: 'recruitment_id',
+    /*
+     * Las 26 se listan aunque los nombres coincidan de los dos lados. Con `*`,
+     * una columna nueva en la vista viajaría sola y haría fallar el upsert
+     * contra una tabla que no la tiene; con la lista, un renombre falla en
+     * BigQuery diciendo qué columna no existe. El fallo ruidoso está del lado
+     * correcto.
+     */
+    select: [
+      'recruitment_id',
+      'candidate_name',
+      'recruiter',
+      'stage',
+      'current_status',
+      'branch_code',
+      'nmls_number',
+      'licensed_states',
+      'created_date',
+      'qualification_date',
+      'proposal_date',
+      'negotiation_date',
+      'close_date',
+      'closed_won_date',
+      'date_of_hire',
+      'last_stage_change',
+      'last_modified',
+      'loan_volume_14m',
+      'transactions_14m',
+      'mmi_link',
+      'reason_for_loss',
+      'reason_for_loss_detail',
+      'is_hired',
+      'is_lost',
+      'is_open',
+      'dias_abierto',
     ].join(', '),
   },
 ];
