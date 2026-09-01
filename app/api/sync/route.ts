@@ -378,6 +378,22 @@ const SYNCS: TableSync[] = [
       'is_closed',
       'counts_for_division',
       'is_second_lien_heloc',
+      /*
+       * En qué etapa quedó el préstamo, con once valores posibles.
+       *
+       * ⚠ NO SIRVE PARA DECIDIR SI UN PRÉSTAMO CERRÓ, y la tentación existe
+       * porque los cierres se concentran en cuatro de esos valores -- Purchase
+       * (388), Completion (50), Shipping (24) y Funding (7). Quien cierra lo
+       * deciden `ms_funding` para Banked y `ms_completion` para Brokered, y eso
+       * ya está resuelto en `is_closed` y `counts_for_division`, dos líneas más
+       * arriba. Usar el milestone en su lugar sería una TERCERA regla para la
+       * misma pregunta, y la que menos sabe de las tres: no distingue canal.
+       *
+       * Para qué sirve entonces: para ver dónde se detuvo lo que NO cerró. Los
+       * 4.033 en 'Started' son préstamos que nunca avanzaron, y hoy eso no se
+       * puede mirar desde Supabase.
+       */
+      'last_finished_milestone',
       'strategy',
       'loan_officer_strategy',
       'has_salesforce',
