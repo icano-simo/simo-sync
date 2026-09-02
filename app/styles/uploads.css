@@ -168,6 +168,19 @@
   background: var(--emerald-50);
   color: var(--emerald-800);
 }
+/*
+ * Ámbar y no rojo: la carga salió bien. Un branch sin decidir no es un fallo --
+ * es lo único que quedó pendiente de una carga que funcionó, y por eso va como
+ * bloque aparte del banner verde en vez de dentro. En rojo se leería como que
+ * algo se rompió y habría que reintentar, que es exactamente lo contrario.
+ */
+.upload-result--warn {
+  border-color: var(--amber-200);
+  background: var(--amber-50);
+  color: var(--amber-800);
+  margin-top: 10px;
+}
+
 .upload-result--err {
   border-color: var(--rose-200);
   background: var(--rose-50);

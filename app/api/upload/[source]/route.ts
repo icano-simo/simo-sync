@@ -28,6 +28,14 @@ import { getBigQueryWriterClient, assertWritableDataset } from '@/lib/bigquery-w
 import { getSourceRules, hasSourceRules, type SourceRules } from '@/lib/uploads/sources';
 import { parseXlsx, parseCsv, dropColumns, type ParsedFile } from '@/lib/uploads/parse';
 import {
+  filterByDivision,
+  hasBranchColumn,
+  type DivisionDecision,
+  type DivisionFilterResult,
+  type DivisionFilterSummary,
+  type PendingBranch,
+} from '@/lib/uploads/divisionFilter';
+import {
   newBatchStamp,
   reservedCollisions,
   withBatchMetadata,
@@ -167,6 +175,10 @@ async function writeLog(
     rows_loaded: number | null;
     status: LogStatus;
     error_message: string | null;
+    /** Resumen de lo descartado por el filtro de división. Sólo roster_us. */
+    division_filtered?: DivisionFilterSummary | null;
+    /** Branches que aparecieron sin decidir. Es lo único accionable de la carga. */
+    division_pending?: PendingBranch[] | null;
   },
 ): Promise<number | null> {
   const { data, error } = await sb.from('load_log').insert(entry).select('id').single();
@@ -424,6 +436,126 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
     );
   }
 
+  // ---- 5a. Filtrar por división ----------------------------------------
+  /*
+   * DESPUÉS DE VALIDAR Y ANTES DE ESCRIBIR. El orden no es libre: la validación
+   * responde "¿llegó el archivo entero?", así que mira las 1.405 filas. Si
+   * midiera después del filtro, un archivo truncado que casualmente trajera sólo
+   * nuestros branches pasaría como bueno.
+   */
+  let filtered: DivisionFilterResult | null = null;
+
+  if (rules.divisionFilter) {
+    const rule = rules.divisionFilter;
+
+    if (!hasBranchColumn(parsed, rule)) {
+      const message =
+        `the division filter needs column "${rule.branchColumn}", which is not in the file; ` +
+        `columns found: ${parsed.headers.join(', ')}`;
+      await writeLog(sb, {
+        source_key: sourceKey,
+        user_email: userEmail,
+        file_name: fileName,
+        rows_loaded: null,
+        status: 'validation_failed',
+        error_message: message,
+      });
+      return Response.json(
+        { ok: false, stage: 'division_filter', error: message },
+        { status: 422 },
+      );
+    }
+
+    const { data: decisions, error: decisionsError } = await sb
+      .from('branch_division_decision')
+      .select('branch_code, in_division');
+
+    /*
+     * ⚠ ACÁ SE ABORTA, Y ES LA GUARDA MÁS IMPORTANTE DE ESTA RUTA.
+     *
+     * Sin decisiones, los 24 branches que empiezan con 7 caen todos en "sin
+     * decidir" y entrarían -- incluidos los 9 que ya se decidieron ajenos. Un
+     * problema de permisos se convertiría en una fuga.
+     *
+     * Y la lista vacía es tan sospechosa como el error: con RLS, una tabla sin
+     * política devuelve CERO FILAS y `error: null`, indistinguible de una tabla
+     * vacía. Por eso los dos casos abortan, y el mensaje dice que el problema
+     * son las decisiones y no el archivo: quien lo lea tiene que ir a mirar
+     * permisos, no a revisar el Excel.
+     */
+    if (decisionsError) {
+      const message =
+        `could not read uploads.branch_division_decision (${decisionsError.message}); ` +
+        'refusing to load: without the decisions every 7xx branch would look undecided ' +
+        'and people from other divisions would be written. This is a permissions or ' +
+        'connectivity problem, not a problem with the file.';
+      console.error(`[upload] ${sourceKey}: ${message}`);
+      await writeLog(sb, {
+        source_key: sourceKey,
+        user_email: userEmail,
+        file_name: fileName,
+        rows_loaded: null,
+        status: 'error',
+        error_message: message,
+      });
+      return Response.json({ ok: false, stage: 'division_filter', error: message }, { status: 503 });
+    }
+
+    if (!decisions || decisions.length === 0) {
+      const message =
+        'uploads.branch_division_decision came back empty; refusing to load. With RLS a ' +
+        'table without a policy returns zero rows and no error, so this is most likely a ' +
+        'permissions problem rather than an empty table. Without the decisions every 7xx ' +
+        'branch would look undecided and people from other divisions would be written.';
+      console.error(`[upload] ${sourceKey}: ${message}`);
+      await writeLog(sb, {
+        source_key: sourceKey,
+        user_email: userEmail,
+        file_name: fileName,
+        rows_loaded: null,
+        status: 'error',
+        error_message: message,
+      });
+      return Response.json({ ok: false, stage: 'division_filter', error: message }, { status: 503 });
+    }
+
+    filtered = filterByDivision(parsed, rule, decisions as DivisionDecision[]);
+
+    /*
+     * Cero filas después de filtrar no es "no había nadie de la división": el
+     * archivo pasó la validación de filas, así que traía gente. Es el archivo
+     * equivocado, o la columna del branch trae otra cosa. Cargar cero filas en
+     * modo append no rompe nada, pero deja una carga vacía que después nadie
+     * entiende.
+     */
+    if (filtered.parsed.rows.length === 0) {
+      const message =
+        `every row was filtered out: ${filtered.summary.otra_division} from other ` +
+        `divisions, ${filtered.summary.descartado} explicitly excluded, ` +
+        `${filtered.summary.sin_branch} with no branch code`;
+      await writeLog(sb, {
+        source_key: sourceKey,
+        user_email: userEmail,
+        file_name: fileName,
+        rows_loaded: 0,
+        status: 'validation_failed',
+        error_message: message,
+      });
+      return Response.json(
+        { ok: false, stage: 'division_filter', error: message, detalle: filtered.summary },
+        { status: 422 },
+      );
+    }
+
+    parsed = filtered.parsed;
+
+    console.log(
+      `[upload] ${sourceKey}: division filter kept ${parsed.rows.length}, ` +
+        `dropped ${filtered.summary.otra_division}+${filtered.summary.descartado}+` +
+        `${filtered.summary.sin_branch}, pending ${filtered.pending.length}`,
+    );
+  }
+
   // ---- 5b. Descartar columnas que no deben llegar a BigQuery -----------
   /*
    * Después de validar (la validación mira el archivo completo) y antes de
@@ -596,6 +728,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
       user_email: userEmail,
       file_name: fileName,
       rows_loaded: rowsInTable,
+      // Se guardan aunque la carga haya salido bien: un branch sin decidir es
+      // exactamente el caso en que la carga funciona y aun así hay algo que
+      // hacer. Si quedara sólo en la respuesta, se iría con el navegador.
+      division_filtered: filtered?.summary ?? null,
+      division_pending: filtered?.pending ?? null,
       status: matches ? 'ok' : 'error',
       error_message: matches
         ? null
@@ -679,6 +816,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
         upload_batch_id: isAppend ? batch.uploadBatchId : null,
         filas_parseadas: toLoad.rows.length,
         filas_en_tabla: rowsInTable,
+        // Sólo para las fuentes con filtro de división; null en las demás.
+        filtro_division: filtered?.summary ?? null,
+        branches_pendientes: filtered?.pending ?? null,
         filas_descartadas: parsed.discardedRows,
         columnas_del_archivo: parsed.headers.length,
         columnas_cargadas: toLoad.headers.length,
