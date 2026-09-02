@@ -1,3 +1,5 @@
+import type { DivisionRule } from './divisionFilter';
+
 /**
  * Reglas de parseo POR FUENTE.
  *
@@ -19,6 +21,14 @@
 
 export type SourceRules = {
   /**
+   * Filtrar filas por división antes de escribir a BigQuery.
+   *
+   * Sólo la necesita `roster_us`, cuyo export llega con las 1.405 personas de
+   * todo Supreme. Ver `lib/uploads/divisionFilter.ts` para por qué el filtro va
+   * acá y no en una vista, y por qué un branch sin decidir entra igual.
+   */
+  divisionFilter?: DivisionRule;
+  /**
    * Columna que no puede venir vacía. Las filas donde esté vacía se descartan
    * ANTES de contar, porque son basura de la conversión, no datos.
    */
@@ -32,6 +42,18 @@ export type SourceRules = {
 };
 
 export const SOURCE_RULES: Record<string, SourceRules> = {
+  roster_us: {
+    /*
+     * El archivo trae todo Supreme y sólo entran los branches de la división.
+     * La columna del branch es 'Br #' en el archivo, que normaliza a 'br'.
+     *
+     * ⚠ El prefijo NO alcanza como regla: 24 branches empiezan con 7 y sólo 15
+     * son nuestros. Lo que decide es `uploads.branch_division_decision`; el
+     * prefijo sólo evita preguntar por los 190 branches que claramente no son
+     * de la división.
+     */
+    divisionFilter: { branchColumn: 'br', prefix: '7' },
+  },
   encompass: {
     // La conversión genera filas vacías al final: sin Loan Number no es un préstamo.
     requireNonEmpty: 'Loan Number',

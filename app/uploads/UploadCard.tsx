@@ -50,6 +50,37 @@ function formatDate(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
+/** Un branch que apareció en el archivo y todavía nadie decidió. */
+type PendingBranch = { branch_code: string; people: number };
+
+/**
+ * El aviso de branches sin decidir.
+ *
+ * Va SEPARADO del resultado de la carga y con el estilo de advertencia, aunque
+ * la carga haya salido bien: es lo único de esta pantalla sobre lo que hay que
+ * actuar. Un branch nuevo entró igual --por diseño-- y su gente ya está en
+ * BigQuery; lo que falta es que alguien decida si pertenece a la división.
+ *
+ * Se nombran los branches y cuánta gente traen, porque eso es lo que hace la
+ * diferencia entre "decido esto ahora" y "lo veo mañana".
+ */
+function pendingNotice(pending: PendingBranch[] | undefined | null) {
+  if (!pending || pending.length === 0) return null;
+
+  const total = pending.reduce((n, b) => n + b.people, 0);
+  const lista = pending.map((b) => `${b.branch_code} (${b.people})`).join(', ');
+
+  return (
+    <div className="upload-result upload-result--warn">
+      <strong>
+        {pending.length === 1 ? '1 branch sin decidir' : `${pending.length} branches sin decidir`}
+      </strong>
+      : {lista}. {total === 1 ? 'Esa persona entró' : `Esas ${total} personas entraron`} a la carga;
+      falta decidir si el branch es de la división.
+    </div>
+  );
+}
+
 /** Lo que la ruta devuelve sobre el sync que dispara al terminar la carga. */
 type SyncInfo = {
   disparado?: boolean;
@@ -252,7 +283,11 @@ export default function UploadCard({ source, recent }: { source: SourceRow; rece
       {result?.kind === 'ok'
         ? (() => {
             const nota = syncMessage(result.body.sync as SyncInfo | undefined, source.source_key);
+            const pendientes = pendingNotice(
+              result.body.branches_pendientes as PendingBranch[] | null | undefined,
+            );
             return (
+              <>
               <div className="upload-result upload-result--ok">
                 Cargadas <strong>{String(result.body.filas_en_tabla)}</strong> filas en{' '}
                 {String(result.body.destino)} ({String(result.body.columnas_cargadas)} columnas
@@ -262,6 +297,8 @@ export default function UploadCard({ source, recent }: { source: SourceRow; rece
                 ).
                 {nota ? <div className="upload-result__note">{nota}</div> : null}
               </div>
+              {pendientes}
+              </>
             );
           })()
         : null}
