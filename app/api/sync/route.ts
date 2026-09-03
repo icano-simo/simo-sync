@@ -376,10 +376,16 @@ const SYNCS: TableSync[] = [
     /*
      * Actividad comercial. Primera tabla del job fuera de b2b_metrics.
      *
-     * GRANO: un préstamo. Verificado contra la vista antes de escribir esto --
-     * 4,779 filas, 4,779 loan_number distintos, ninguno nulo -- así que
-     * loan_number sirve como clave de conflicto y ninguna tanda puede traer dos
-     * filas que colisionen (el problema que tuvo realtor_owner_map).
+     * GRANO: un préstamo.
+     *
+     * INVARIANTE: COUNT(*) = COUNT(DISTINCT loan_number), ningún `loan_number`
+     * nulo. Es lo que hace que sirva de clave de conflicto y que ninguna tanda
+     * pueda traer dos filas que colisionen -- el problema que tuvo
+     * realtor_owner_map. Comprobado el 2026-09-03 con 4,872 filas.
+     *
+     * La cantidad de préstamos sube con cada carga de Encompass, así que
+     * verificarla contra un número fijo sólo produce falsas alarmas: eran 4,779
+     * al escribir la primera versión de esta nota.
      *
      * La vista expone 90 columnas; van las 36 que la tabla necesita, con los
      * renombres en SQL como en las demás. Los tipos se verificaron contra los
@@ -387,8 +393,13 @@ const SYNCS: TableSync[] = [
      * texto 'YYYY-MM' de la loan_records vieja, `closing_month` incluido.
      *
      * OJO AL AGREGAR: `counts_for_division` es la columna para totales de
-     * división; `is_closed` es sólo para el detalle de una sucursal. Hoy la
-     * diferencia son 5 préstamos -- 466 cerrados contra 461 que cuentan --
+     * división; `is_closed` es sólo para el detalle de una sucursal.
+     *
+     * INVARIANTE: `counts_for_division` implica `is_closed`, nunca al revés --
+     * o sea `COUNTIF(counts_for_division AND NOT is_closed) = 0`. Comprobado el
+     * 2026-09-03. Los absolutos se mueven con cada carga (466 contra 461 al
+     * escribir esto, 485 contra 480 el 2026-09-03), así que lo verificable es
+     * la implicación y no la diferencia. Va en un sentido y no en el otro
      * porque un HELOC de segundo gravamen le suma al loan officer y no a la
      * división. Usar is_closed en un agregado infla los cierres sin que nada
      * falle.
@@ -462,7 +473,12 @@ const SYNCS: TableSync[] = [
      *
      * GRANO: una persona. `person_code` es la PK de la tabla destino, así que
      * sirve de clave de conflicto y ninguna tanda puede traer dos filas que
-     * colisionen. Son 108 personas: una sola tanda de las de 500.
+     * colisionen.
+     *
+     * INVARIANTE: COUNT(*) = COUNT(DISTINCT person_code), ningún `person_code`
+     * nulo. El padrón crece y se encoge --altas, bajas, `user_addition`-- así
+     * que el número del día no verifica nada; lo que no puede pasar es que dos
+     * filas compartan la clave. Hoy entra en una sola tanda de las de 500.
      *
      * MAPEO: la vista trae los mismos nombres que la tabla. Las tres
      * diferencias, todas deliberadas:
@@ -566,17 +582,30 @@ const SYNCS: TableSync[] = [
      * ========================================================================
      *
      * El tercer pipeline de Salesforce que entra al job: los otros dos son
-     * préstamos (`opportunities`) y realtors (`realtor_owner_map`). 233
-     * candidatos, 26 columnas, todas con el mismo nombre de los dos lados.
+     * préstamos (`opportunities`) y realtors (`realtor_owner_map`). 26
+     * columnas, todas con el mismo nombre de los dos lados.
      *
-     * Verificado antes de escribir esto: 233 filas, 233 `recruitment_id`
-     * distintos, ninguno nulo. Sirve como clave de conflicto.
+     * INVARIANTES, no conteos -- ver la nota de `hiring_tracking` sobre por qué:
+     *
+     *   COUNT(*) = COUNT(DISTINCT recruitment_id) y ningún `recruitment_id`
+     *     nulo. Es lo que hace que sirva de clave de conflicto.
+     *   `dias_abierto IS NOT NULL` exactamente cuando `is_open`. La vista lo
+     *     deja nulo para los cerrados, así que una fila cerrada con días o una
+     *     abierta sin ellos es un cambio de la vista, no un alta.
+     *   `is_hired` implica `close_date IS NOT NULL`. Es la fecha de
+     *     contratación real (ver abajo), así que un contratado sin ella
+     *     rompería cualquier cuenta por mes.
+     *   `is_hired`, `is_lost` e `is_open` son excluyentes: suman exactamente 1
+     *     por fila.
+     *
+     * Comprobados los cuatro el 2026-09-03, con 234 filas.
      *
      * ⚠ LAS FECHAS DE ETAPA NO MIDEN TIEMPOS DE CICLO, y es la trampa más
      * probable de esta tabla. El conector no trae OpportunityHistory ni
      * OpportunityFieldHistory, así que no existe registro de cuándo un
      * candidato entró a una etapa. Lo único que hay son tres campos que alguien
-     * llena a mano, y están llenos en menos de un tercio:
+     * llena a mano, y están llenos en menos de un tercio. Medido el 2026-09-02
+     * sobre 233 filas -- son observaciones, no invariantes:
      *
      *   qualification_date   69 de 233
      *   proposal_date        62
@@ -587,22 +616,23 @@ const SYNCS: TableSync[] = [
      * esto mide el hábito de carga de datos, no el proceso.
      *
      * ⚠ PARA "CUÁNTO LLEVA ABIERTO" VA `dias_abierto`, que la vista calcula
-     * desde `created_date`. Está en 106 de 233 y eso es correcto, no un campo a
-     * medio llenar: la vista lo deja en NULL para los cerrados, y 106 es
-     * exactamente la cantidad de abiertos.
+     * desde `created_date`. Que esté a medio poblar es correcto y no un campo a
+     * medio llenar: la vista lo deja en NULL para los cerrados, así que está
+     * exactamente en los abiertos. Ése es el invariante de arriba; el conteo
+     * del día no dice nada.
      *
      * ⚠ LA FECHA DE CONTRATACIÓN ES `close_date`, NO `date_of_hire`.
-     * `date_of_hire` está en 4 de 233 -- nadie lo llena al contratar.
-     * `close_date` está en las 233, y ninguno de los 39 contratados la tiene
-     * vacía.
+     * `date_of_hire` estaba en 4 de 233 al 2026-09-02 -- nadie lo llena al
+     * contratar. `close_date` está en TODAS las filas, y ningún contratado la
+     * tiene vacía; eso último es el invariante de arriba.
      *
-     * Otras dos casi vacías, para saberlo antes de construir encima:
-     * `licensed_states` (2 de 233) y `loan_volume_14m` (18, de los cuales 16
-     * son de los contratados).
+     * Otras dos casi vacías, para saberlo antes de construir encima, medidas el
+     * 2026-09-02 sobre 233 filas: `licensed_states` (2) y `loan_volume_14m`
+     * (18, de los cuales 16 son de los contratados).
      *
      * LA EMPRESA DEL CANDIDATO NO ESTÁ. No está en
      * `Broker_Company_Encompass__c` ni en `Referred_By_Company__c`: las dos
-     * vienen vacías en las 233. Dónde se registra, si se registra, es una
+     * vienen vacías en TODAS las filas. Dónde se registra, si se registra, es una
      * pregunta abierta -- no hay que inventarle un campo.
      */
     name: 'lo_recruitment',
@@ -665,9 +695,10 @@ const SYNCS: TableSync[] = [
      * LA CLAVE DE CONFLICTO ES UN NOMBRE, Y ESO ES LO QUE HAY
      * ------------------------------------------------------------------------
      * El tablero no trae identificador. `nombre` es lo único estable, y es la
-     * PK de la tabla destino. Verificado antes de escribir esto: 39 filas, 39
-     * `nombre` distintos, ninguno vacío. Ninguna tanda puede traer dos filas
-     * que colisionen.
+     * PK de la tabla destino.
+     *
+     * INVARIANTE: COUNT(*) = COUNT(DISTINCT nombre) y ningún `nombre` nulo ni
+     * vacío. Ninguna tanda puede traer dos filas que colisionen.
      *
      * Si dos personas tuvieran el mismo nombre se pisarían, y el síntoma sería
      * que el conteo no coincide --38 filas en Supabase contra 39 en BigQuery--
@@ -716,8 +747,27 @@ const SYNCS: TableSync[] = [
      *                    parecían faltantes -- o sea, contarían como próximos
      *                    ingresos cuando ya entraron.
      *
-     * VERIFICACIÓN DE LA CORRIDA: 39 filas, 6 con `cuenta_como_proximo_ingreso`,
-     * 7 canceladas.
+     * ------------------------------------------------------------------------
+     * QUÉ VERIFICAR DESPUÉS DE UNA CORRIDA
+     * ------------------------------------------------------------------------
+     * INVARIANTES, no conteos. RRHH agrega y quita gente del tablero todo el
+     * tiempo, así que "39 filas" falla el día que entra alguien -- y falla
+     * pareciendo un problema del mapeo, que es lo peor de los dos mundos.
+     * Cada uno se escribe como `COUNTIF(...) = 0`:
+     *
+     *   COUNT(*) = COUNT(DISTINCT nombre), sin nulos ni vacíos.
+     *   `cuenta_como_proximo_ingreso` = (`seccion` = 'New Hire' AND
+     *     `person_code` IS NULL AND NOT `is_cancelled`) en TODA fila. Es la
+     *     regla escrita como comprobación: si deja de valer, la vista cambió.
+     *   De ahí salen las dos que importan y no hay que recordar: nadie cuenta
+     *     como próximo ingreso estando ya en el roster, ni estando cancelado.
+     *   `es_nuevo` = (`person_code` IS NULL) en TODA fila. Es lo que impide
+     *     confundir `es_nuevo` con `cuenta_como_proximo_ingreso`.
+     *   El conteo de Supabase contra el de BigQuery, que `syncTable` ya
+     *     compara y devuelve en `coincide`.
+     *
+     * Comprobados los cuatro el 2026-09-03, con 39 filas: 6 próximos ingresos
+     * y 7 canceladas. Esos dos números son la foto de ese día, no el criterio.
      */
     name: 'hiring_tracking',
     source: 'hr_centralizado.hr_hiring_tracking',
@@ -779,10 +829,9 @@ const SYNCS: TableSync[] = [
      * el marcador de branch para quien no tiene uno asignado. Rehacer eso del
      * lado del portal sería tener dos versiones de las mismas reglas.
      *
-     * Clave de conflicto `nombre`, que es la PK del destino. Verificado: 19
-     * filas, 19 nombres distintos, ninguno vacío. Mismo razonamiento --y mismo
-     * límite-- que en `hiring_tracking`: arriba no hay identificador único que
-     * cruce los dos orígenes.
+     * Clave de conflicto `nombre`, que es la PK del destino. Mismo razonamiento
+     * --y mismo límite-- que en `hiring_tracking`: arriba no hay identificador
+     * único que cruce los dos orígenes. El invariante está abajo.
      *
      * ------------------------------------------------------------------------
      * ⚠ PARA PROYECTAR VA `producira`, NO EL CONTEO DE PERSONAS
@@ -832,11 +881,11 @@ const SYNCS: TableSync[] = [
      * ------------------------------------------------------------------------
      * ⚠ `branch_code = 'Recruitment'` ES UN MARCADOR, NO UN BRANCH
      * ------------------------------------------------------------------------
-     * Cinco candidatos de Salesforce no tienen branch usable: tres dicen
-     * literalmente 'Recruitment', uno trae 'KGFR82' de la era City Lending y
-     * uno viene vacío. Los cinco quedan con `branch_code = 'Recruitment'` y
-     * `sin_branch_asignado = true` -- verificado que los dos conteos son 5 y
-     * son las mismas filas.
+     * Hay candidatos de Salesforce sin branch usable. Al 2026-09-03 son cinco:
+     * tres dicen literalmente 'Recruitment', uno trae 'KGFR82' de la era City
+     * Lending y uno viene vacío. Todos quedan con `branch_code = 'Recruitment'`
+     * y `sin_branch_asignado = true` -- las dos cosas marcan LAS MISMAS filas,
+     * y eso sí es invariante (está abajo); cuántas son cambia.
      *
      * Se conservan VISIBLES en vez de descartarse: no tener branch asignado es
      * un dato sobre el proceso de contratación, no un motivo para desaparecer.
@@ -852,8 +901,35 @@ const SYNCS: TableSync[] = [
      * columna sobre: significa que la limpieza de arriba está al día. No se
      * puede validar contra el dato mientras siga en cero.
      *
-     * VERIFICACIÓN DE LA CORRIDA: 19 filas, 15 con `producira`, 3 con
-     * `es_nppm`, 5 con `sin_branch_asignado`, y confianza en 6/1/8/4.
+     * ------------------------------------------------------------------------
+     * QUÉ VERIFICAR DESPUÉS DE UNA CORRIDA
+     * ------------------------------------------------------------------------
+     * INVARIANTES, no conteos: los dos pipelines de arriba se mueven solos, así
+     * que "19 filas" o "15 producen" fallan con cualquier alta legítima. Cada
+     * uno se escribe como `COUNTIF(...) = 0`:
+     *
+     *   COUNT(*) = COUNT(DISTINCT nombre), sin nulos ni vacíos.
+     *   `confianza` sólo toma los cuatro valores conocidos, y `origen` sólo
+     *     'hr_pipeline' o 'salesforce'. Un valor nuevo cambia cómo se proyecta
+     *     y no debería aparecer sin que nadie lo note.
+     *   `es_nppm` implica NOT `producira`. Es la regla del punto 1 escrita como
+     *     comprobación: un NPPM que produzca duplicaría el volumen del branch.
+     *   `sin_branch_asignado` = (`branch_code` = 'Recruitment') en TODA fila.
+     *     Si se separan, o hay un branch real llamado 'Recruitment' o hay
+     *     alguien sin branch que el marcador no marcó.
+     *   `origen` = 'hr_pipeline' implica `fecha_inicio IS NOT NULL`.
+     *   `dias_abierto`, por origen y sólo por origen:
+     *       'hr_pipeline'          = DATE_DIFF(CURRENT_DATE(), fecha_inicio, DAY)
+     *       'salesforce', ganado   IS NULL
+     *       'salesforce', abierto  IS NOT NULL
+     *     Es el invariante que sostiene la advertencia de las tres unidades: si
+     *     deja de valer, la columna cambió de significado en silencio.
+     *   El conteo de Supabase contra el de BigQuery, que `syncTable` ya compara
+     *     y devuelve en `coincide`.
+     *
+     * Comprobados todos el 2026-09-03, con 19 filas: 15 `producira`, 3
+     * `es_nppm`, 5 `sin_branch_asignado` y confianza en 6/1/8/4. Esos números
+     * son la foto de ese día, no el criterio.
      */
     name: 'future_loan_officer',
     source: 'lending_marts.fct_future_loan_officer',
