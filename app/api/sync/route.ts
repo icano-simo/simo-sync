@@ -7,10 +7,10 @@
  * never used: an upsert leaves no window where the table is empty, which
  * matters because these tables are read by live apps.
  *
- * Eight tables across three schemas -- b2b_metrics (Salesforce),
+ * Nine tables across three schemas -- b2b_metrics (Salesforce),
  * activity_report (Encompass + Salesforce, más el pipeline de reclutamiento) y
- * org (roster de RRHH). El snapshot de pipeline, que corre aparte al final y no
- * usa `syncTable`, es el noveno destino.
+ * org (roster de RRHH y tablero de contrataciones). El snapshot de pipeline,
+ * que corre aparte al final y no usa `syncTable`, es el décimo destino.
  *
  * Order of operations is deliberate:
  *   1. authorize  2. freshness gate  3. write  4. sweep  5. verify by counting
@@ -93,10 +93,29 @@ const SWEEPABLE = new Set([
    */
   'activity_report.lo_recruitment',
   /*
+   * Espejo del tablero de contrataciones de RRHH en Monday. Una fila que
+   * desaparece arriba es una contratación que RRHH quitó del tablero, no una
+   * decisión que haya que preservar.
+   *
+   * ⚠ ES EXACTAMENTE LO CONTRARIO QUE `org.roster_current`, dos párrafos abajo,
+   * y la diferencia no es de criterio sino de qué representa cada tabla. En el
+   * roster, dejar de aparecer es un hecho sobre una PERSONA --se fue-- y se
+   * marca para conservar su historia. Acá, dejar de aparecer es un hecho sobre
+   * una FILA DE UN TABLERO que alguien mantiene a mano, y no hay nada que
+   * conservar: si RRHH la quitó, no está.
+   *
+   * El barrido es además lo que hace que un nombre corregido arriba no deje un
+   * duplicado. La clave de conflicto es el nombre (ver el spec), así que
+   * arreglarle el doble espacio a 'Jorge  Betancur' crea una fila nueva; sin
+   * barrido, la vieja se quedaría para siempre y el conteo no coincidiría nunca
+   * más.
+   */
+  'org.hiring_tracking',
+  /*
    * ⚠ `org.roster_current` NO ESTÁ ACÁ, Y NO ES UN OLVIDO.
    *
    * El sweep borra las filas que no volvieron a aparecer arriba. Para las otras
-   * siete tablas eso es exactamente lo que se quiere: son espejos de su fuente.
+   * ocho tablas eso es exactamente lo que se quiere: son espejos de su fuente.
    * Para el roster, borrar a quien desapareció del archivo choca con dos cosas
    * que ya están decididas:
    *
@@ -616,6 +635,121 @@ const SYNCS: TableSync[] = [
       'is_lost',
       'is_open',
       'dias_abierto',
+    ].join(', '),
+  },
+  {
+    /*
+     * ========================================================================
+     * TABLERO DE CONTRATACIONES DE RRHH
+     * ========================================================================
+     *
+     * Exportado de Monday y subido por la app de cargas. 39 filas, 23 columnas
+     * más `synced_at`, todas con el mismo nombre de los dos lados. Segunda
+     * tabla del job en el schema `org`.
+     *
+     * Las tres columnas de metadatos que escribe el cargador
+     * --`upload_batch_id`, `uploaded_at`, `row_index`-- NO se sincronizan: la
+     * vista las trae (26 columnas) y la tabla destino no las tiene. Sirven para
+     * reconstruir la vista desde el stage, no para consultar el tablero.
+     *
+     * ------------------------------------------------------------------------
+     * LA CLAVE DE CONFLICTO ES UN NOMBRE, Y ESO ES LO QUE HAY
+     * ------------------------------------------------------------------------
+     * El tablero no trae identificador. `nombre` es lo único estable, y es la
+     * PK de la tabla destino. Verificado antes de escribir esto: 39 filas, 39
+     * `nombre` distintos, ninguno vacío. Ninguna tanda puede traer dos filas
+     * que colisionen.
+     *
+     * Si dos personas tuvieran el mismo nombre se pisarían, y el síntoma sería
+     * que el conteo no coincide --38 filas en Supabase contra 39 en BigQuery--
+     * no un error. Hoy no pasa. Cuando pase, la salida no es cambiar la clave
+     * acá sino conseguir un identificador arriba.
+     *
+     * ⚠ EL NOMBRE VIENE COMO LO ESCRIBIERON: 'Jorge  Betancur' trae DOS
+     * ESPACIOS. Es la clave, así que corregirlo en el tablero no edita la fila
+     * -- crea una nueva y el barrido se lleva la vieja. Para un espejo eso es
+     * correcto, pero no hay que confundirlo con "se duplicó".
+     *
+     * ------------------------------------------------------------------------
+     * LA REGLA QUE IMPORTA: `cuenta_como_proximo_ingreso`
+     * ------------------------------------------------------------------------
+     * Cuentan como próximo ingreso SÓLO los de la sección 'New Hire' que NO
+     * están en el roster.
+     *
+     * ⚠ UNA VEZ QUE ALGUIEN LLEGA AL ROSTER, EL ROSTER MANDA. Aunque el tablero
+     * lo siga listando, y aunque el roster lo marque inactivo después. Aparecer
+     * en el roster significa que entró; el tablero describe lo que va a pasar y
+     * el roster lo que pasó. Sumar a alguien que ya entró lo contaría dos veces:
+     * una como persona del roster y otra como ingreso pendiente.
+     *
+     * De ahí que 14 filas tengan `es_nuevo` y sólo 6 cuenten: la diferencia son
+     * las canceladas y las de la sección 'Completed New Hire'.
+     *
+     * Hoy son 6, y el cargo decide dónde va cada uno en el portal:
+     *
+     *   Jose Flores, Victoria Zambrano    Loan Officer -- van a producir
+     *   Leonel Turcios, Jorge Betancur,
+     *     Albeiro Lopera                  Business Development -- estrategia NPPM
+     *   Mayra Tipacti                     LO Assistant
+     *
+     * ------------------------------------------------------------------------
+     * DOS COSAS DEL DATO QUE NO SON ERRORES
+     * ------------------------------------------------------------------------
+     *   is_cancelled     7 filas. El marcador viene DENTRO del nombre
+     *                    ('... - Cancelled'), no en una columna de estado, y la
+     *                    vista lo saca del nombre para que la clave no lo
+     *                    lleve. Se conservan porque una contratación cancelada
+     *                    es información. No cuentan como próximo ingreso.
+     *   cruzo_por_alias  7 filas. El tablero escribe el nombre legal completo
+     *                    donde el roster usa la forma corta, y eso sólo se
+     *                    salva con `hr_centralizado.person_alias_manual`. Sin
+     *                    esos alias, cuatro personas que SÍ están en el roster
+     *                    parecían faltantes -- o sea, contarían como próximos
+     *                    ingresos cuando ya entraron.
+     *
+     * VERIFICACIÓN DE LA CORRIDA: 39 filas, 6 con `cuenta_como_proximo_ingreso`,
+     * 7 canceladas.
+     */
+    name: 'hiring_tracking',
+    source: 'hr_centralizado.hr_hiring_tracking',
+    target: 'hiring_tracking',
+    schema: 'org',
+    conflict: 'nombre',
+    /*
+     * Las 23 se listan aunque los nombres coincidan de los dos lados, igual que
+     * en `lo_recruitment`: con `*` viajarían también las tres de metadatos y el
+     * upsert fallaría contra una tabla que no las tiene.
+     */
+    select: [
+      'nombre',
+      'seccion',
+      // El nombre tal como está en el tablero, con el '- Cancelled' incluido.
+      // `nombre` es la versión limpia; ésta es la que se busca en Monday.
+      'nombre_en_el_tablero',
+      'is_cancelled',
+      'cargo',
+      // Del tablero, no del roster: para quien todavía no entró no hay otro.
+      'branch_en_el_tablero',
+      'manager',
+      'hr_rep',
+      'region',
+      'employment_status',
+      'rehire',
+      'fecha_inicio',
+      // Los seis pasos del alta. Texto libre del tablero, no booleanos.
+      'new_hire_packet_sent',
+      'completed_new_hire_packet_received',
+      'background_check',
+      'nmls_access',
+      'i_9_documents',
+      'complete',
+      'notes',
+      // NULL cuando la persona no está en el roster, que es justo el caso que
+      // `cuenta_como_proximo_ingreso` selecciona.
+      'person_code',
+      'cruzo_por_alias',
+      'es_nuevo',
+      'cuenta_como_proximo_ingreso',
     ].join(', '),
   },
 ];
