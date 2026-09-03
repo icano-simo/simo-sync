@@ -207,7 +207,128 @@
 }
 
 /* ---------------------------------------------------------------------------
- * 4. Historial de cargas
+ * 4. Previo de columnas
+ *
+ * Lo que trae el archivo elegido, antes de subirlo. Mismo lenguaje visual que
+ * `.upload-result`: es un bloque informativo debajo del control de subida.
+ * ------------------------------------------------------------------------ */
+
+.cols {
+  margin-top: 16px;
+  border: 1px solid var(--slate-200);
+  background: var(--slate-50);
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: var(--slate-600);
+}
+
+.cols__summary {
+  cursor: pointer;
+  line-height: 1.5;
+  /* El triángulo nativo es el único indicio de que se puede plegar. */
+  list-style: revert;
+}
+.cols__summary strong {
+  color: var(--navy);
+  font-weight: 700;
+}
+
+/*
+ * Scroll propio y con techo: 58 columnas (Encompass) empujarían el historial
+ * fuera de la vista, y hay una tarjeta por fuente en la misma página.
+ */
+.cols__scroll {
+  max-height: 260px;
+  overflow: auto;
+  margin-top: 10px;
+  border-top: 1px solid var(--slate-200);
+}
+
+.cols__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.cols__table th,
+.cols__table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--slate-100);
+  vertical-align: top;
+}
+
+.cols__table th {
+  font-family: var(--font-display);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--slate-400);
+  border-bottom-color: var(--slate-200);
+  /* El encabezado queda fijo: con 58 filas, saber qué lado es cuál importa. */
+  position: sticky;
+  top: 0;
+  background: var(--slate-50);
+}
+
+.cols__pos {
+  color: var(--slate-400);
+  font-variant-numeric: tabular-nums;
+  width: 1%;
+  white-space: nowrap;
+}
+
+/* El nombre de BigQuery es un identificador que se copia y se pega. */
+.cols__norm {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--slate-700);
+}
+
+/* Un encabezado vacío en el archivo: de ahí salen 'column' y 'column_2'. */
+.cols__blank {
+  color: var(--slate-400);
+  font-style: italic;
+}
+
+/*
+ * Qué nombre va en cuál lista de `uploads.source`. Atenuada: orienta a quien
+ * configura la fuente, no es parte de lo que trae el archivo.
+ */
+.cols__legend {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--slate-200);
+  font-size: 11.5px;
+  color: var(--slate-500);
+  line-height: 1.5;
+}
+.cols__legend code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--slate-700);
+}
+
+/* Marca de `drop_columns`: la columna no llega a BigQuery. */
+.cols__tag {
+  display: inline-block;
+  margin-left: 8px;
+  border-radius: var(--radius-full);
+  padding: 2px 8px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--amber-50);
+  border: 1px solid var(--amber-200);
+  color: var(--amber-700);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+ * 5. Historial de cargas
  * ------------------------------------------------------------------------ */
 
 .loads {
@@ -285,7 +406,7 @@
 }
 
 /* ---------------------------------------------------------------------------
- * 5. Estado vacío / error de lectura
+ * 6. Estado vacío / error de lectura
  * ------------------------------------------------------------------------ */
 
 .notice {
