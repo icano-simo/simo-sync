@@ -7,10 +7,11 @@
  * never used: an upsert leaves no window where the table is empty, which
  * matters because these tables are read by live apps.
  *
- * Nine tables across three schemas -- b2b_metrics (Salesforce),
- * activity_report (Encompass + Salesforce, más el pipeline de reclutamiento) y
- * org (roster de RRHH y tablero de contrataciones). El snapshot de pipeline,
- * que corre aparte al final y no usa `syncTable`, es el décimo destino.
+ * Ten tables across three schemas -- b2b_metrics (Salesforce),
+ * activity_report (Encompass + Salesforce, más el reclutamiento de Loan
+ * Officers y la unión de los dos pipelines de contratación) y org (roster de
+ * RRHH y tablero de contrataciones). El snapshot de pipeline, que corre aparte
+ * al final y no usa `syncTable`, es el undécimo destino.
  *
  * Order of operations is deliberate:
  *   1. authorize  2. freshness gate  3. write  4. sweep  5. verify by counting
@@ -112,10 +113,18 @@ const SWEEPABLE = new Set([
    */
   'org.hiring_tracking',
   /*
+   * Espejo de la unión de los dos pipelines de contratación. Una fila que
+   * desaparece arriba es alguien que entró al roster --y ahí lo cuenta el
+   * roster, no esta tabla-- o un candidato que se cerró como perdido. En los
+   * dos casos deja de ser un futuro Loan Officer, y conservarlo sería seguir
+   * proyectando producción de alguien que ya no viene.
+   */
+  'activity_report.future_loan_officer',
+  /*
    * ⚠ `org.roster_current` NO ESTÁ ACÁ, Y NO ES UN OLVIDO.
    *
    * El sweep borra las filas que no volvieron a aparecer arriba. Para las otras
-   * ocho tablas eso es exactamente lo que se quiere: son espejos de su fuente.
+   * nueve tablas eso es exactamente lo que se quiere: son espejos de su fuente.
    * Para el roster, borrar a quien desapareció del archivo choca con dos cosas
    * que ya están decididas:
    *
@@ -750,6 +759,135 @@ const SYNCS: TableSync[] = [
       'cruzo_por_alias',
       'es_nuevo',
       'cuenta_como_proximo_ingreso',
+    ].join(', '),
+  },
+  {
+    /*
+     * ========================================================================
+     * FUTUROS LOAN OFFICERS
+     * ========================================================================
+     *
+     * Los dos pipelines de contratación unidos: el tablero de RRHH
+     * (`org.hiring_tracking`, origen 'hr_pipeline') y el reclutamiento de
+     * Salesforce (`activity_report.lo_recruitment`, origen 'salesforce'). 19
+     * filas, 20 columnas más `synced_at`.
+     *
+     * POR QUÉ HACE FALTA ESTA Y NO ALCANZA CON LAS DOS QUE YA ESTÁN: cada una
+     * tiene un solo lado y sus propias reglas. La vista las une y ya aplica el
+     * corte de un año en Closed Won, la exclusión de quienes ya están en el
+     * roster, el descarte de la marca (DUPLICATE) antes de comparar nombres, y
+     * el marcador de branch para quien no tiene uno asignado. Rehacer eso del
+     * lado del portal sería tener dos versiones de las mismas reglas.
+     *
+     * Clave de conflicto `nombre`, que es la PK del destino. Verificado: 19
+     * filas, 19 nombres distintos, ninguno vacío. Mismo razonamiento --y mismo
+     * límite-- que en `hiring_tracking`: arriba no hay identificador único que
+     * cruce los dos orígenes.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ PARA PROYECTAR VA `producira`, NO EL CONTEO DE PERSONAS
+     * ------------------------------------------------------------------------
+     * De los 19, sólo 15 producen. Los 4 que no: 3 de Business Development
+     * --que es estrategia NPPM del branch y no producción propia, ver
+     * `es_nppm`-- y 1 LO Assistant. Contar filas proyectaría 19 originadores
+     * donde hay 15.
+     *
+     * Los 4 caen todos en `confianza = 'confirmado'`: de esos 6, sólo 2
+     * producen. Filtrar por confianza sin filtrar por `producira` es el error
+     * más fácil de cometer acá.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ `confianza` TIENE CUATRO VALORES Y EL ÚLTIMO NO SIRVE PARA PROYECTAR
+     * ------------------------------------------------------------------------
+     *   confirmado  6   del tablero de RRHH, con fecha de inicio
+     *   ganado      1   Closed Won reciente que no llegó al roster
+     *   probable    8   Negotiation con menos de 180 días
+     *   tentative   4   más de 180 días -- HOY ENTRE 323 Y 811 DÍAS
+     *
+     * Los `tentative` no son pipeline: son candidatos que nadie cerró.
+     * Proyectar sobre ellos infla el pronóstico. Verificado que los cuatro
+     * valores son los únicos que aparecen.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ `dias_abierto` SIGNIFICA TRES COSAS DISTINTAS SEGÚN LA FILA
+     * ------------------------------------------------------------------------
+     * Es la trampa menos visible de esta tabla, porque el nombre suena a una
+     * sola cosa y la columna es un entero en todas:
+     *
+     *   origen 'salesforce', abierto   días que el candidato lleva abierto
+     *                                  (hoy 21 a 811)
+     *   origen 'salesforce', ganado    NULL -- ya cerró
+     *   origen 'hr_pipeline'           días respecto de `fecha_inicio`, y
+     *                                  NEGATIVO si todavía no empezó
+     *
+     * Verificado: en las 6 filas de 'hr_pipeline' el valor es exactamente
+     * `DATE_DIFF(CURRENT_DATE(), fecha_inicio, DAY)`. Victoria Zambrano tiene
+     * -11 porque empieza el 14 de septiembre.
+     *
+     * Consecuencias, las dos concretas: un promedio o un MIN sobre las 19
+     * filas mezcla unidades y se come el negativo sin avisar; y el corte de 180
+     * días que define `tentative` sólo tiene sentido para las de Salesforce.
+     * Cualquier cuenta con esta columna se parte por `origen` primero.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ `branch_code = 'Recruitment'` ES UN MARCADOR, NO UN BRANCH
+     * ------------------------------------------------------------------------
+     * Cinco candidatos de Salesforce no tienen branch usable: tres dicen
+     * literalmente 'Recruitment', uno trae 'KGFR82' de la era City Lending y
+     * uno viene vacío. Los cinco quedan con `branch_code = 'Recruitment'` y
+     * `sin_branch_asignado = true` -- verificado que los dos conteos son 5 y
+     * son las mismas filas.
+     *
+     * Se conservan VISIBLES en vez de descartarse: no tener branch asignado es
+     * un dato sobre el proceso de contratación, no un motivo para desaparecer.
+     * Pero agrupar por `branch_code` sin excluirlos inventa un branch llamado
+     * 'Recruitment' con cinco personas. `branch_en_la_fuente` guarda lo que
+     * decía el origen, para poder rastrear de dónde salió cada uno.
+     *
+     * ------------------------------------------------------------------------
+     * `era_duplicado` HOY ES false EN LAS 19
+     * ------------------------------------------------------------------------
+     * Marca a quien venía con la marca (DUPLICATE) en el nombre, que la vista
+     * descarta antes de comparar. Que hoy no haya ninguno no significa que la
+     * columna sobre: significa que la limpieza de arriba está al día. No se
+     * puede validar contra el dato mientras siga en cero.
+     *
+     * VERIFICACIÓN DE LA CORRIDA: 19 filas, 15 con `producira`, 3 con
+     * `es_nppm`, 5 con `sin_branch_asignado`, y confianza en 6/1/8/4.
+     */
+    name: 'future_loan_officer',
+    source: 'lending_marts.fct_future_loan_officer',
+    target: 'future_loan_officer',
+    schema: 'activity_report',
+    conflict: 'nombre',
+    // Las 20 listadas, no `*`: ver la nota de `lo_recruitment`.
+    select: [
+      // 'hr_pipeline' o 'salesforce'. Hace falta para leer `dias_abierto`.
+      'origen',
+      'nombre',
+      'nombre_normalizado',
+      // El nombre tal como lo escribe Salesforce, cuando la fila viene de ahí.
+      'nombre_en_salesforce',
+      'era_duplicado',
+      'stage',
+      'current_status',
+      'recruiter',
+      // Salesforce. La fecha de contratación de un Closed Won.
+      'close_date',
+      'cargo',
+      // 'Recruitment' cuando no hay branch usable. Ver la nota de arriba.
+      'branch_code',
+      'branch_en_la_fuente',
+      'sin_branch_asignado',
+      // Tablero de RRHH. Las 6 de 'hr_pipeline' la tienen; las de Salesforce no.
+      'fecha_inicio',
+      'dias_abierto',
+      'nmls_number',
+      // El id en su origen: recruitment_id de Salesforce, o el nombre del tablero.
+      'id_fuente',
+      'confianza',
+      'producira',
+      'es_nppm',
     ].join(', '),
   },
 ];
