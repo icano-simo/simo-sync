@@ -7,8 +7,15 @@
  * trabajo de esta app es dejar el archivo disponible tal como vino.
  */
 import ExcelJS from 'exceljs';
+import { applyExcelTablePatch } from './excelTablePatch';
 import Papa from 'papaparse';
 import { normalizeHeaders } from './sources';
+
+/*
+ * Antes de leer nada: ExcelJS 4.4.0 no puede abrir el archivo de RRHH por un
+ * defecto en su lectura de tablas. Ver `excelTablePatch.ts`.
+ */
+applyExcelTablePatch();
 
 /** Opciones de parseo que salen de la configuración de la fuente. */
 export type ParseOptions = {
