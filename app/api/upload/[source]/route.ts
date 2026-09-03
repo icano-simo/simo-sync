@@ -18,14 +18,15 @@
  * y nunca a medias.
  */
 import { after, type NextRequest } from 'next/server';
-import type { User } from '@supabase/supabase-js';
-import { getSessionUser } from '@/lib/auth/session';
-import { hasAppAccess } from '@/lib/auth/appAccess';
-import { getServerClient } from '@/lib/supabase/server';
 // Sólo para completar el resultado del sync en load_log; ver recordSyncOutcome.
 import { getSupabaseClient as getAdminUploadsClient } from '@/lib/supabase-admin';
 import { getBigQueryWriterClient, assertWritableDataset } from '@/lib/bigquery-writer';
-import { getSourceRules, hasSourceRules, type SourceRules } from '@/lib/uploads/sources';
+import { hasSourceRules } from '@/lib/uploads/sources';
+import {
+  authorizeSource,
+  resolveHeaderRow,
+  type UploadsClient,
+} from '@/lib/uploads/authorizeSource';
 import { parseXlsx, parseCsv, dropColumns, type ParsedFile } from '@/lib/uploads/parse';
 import {
   filterByDivision,
@@ -141,23 +142,6 @@ async function triggerSync(origin: string, secret: string): Promise<SyncTrigger>
   }
 }
 
-type SourceConfig = {
-  source_key: string;
-  display_name: string;
-  target_dataset: string;
-  target_table: string;
-  load_mode: string;
-  min_rows_expected: number;
-  sheet_name: string | null;
-  is_active: boolean;
-  /** Fila del encabezado, 1-based. null = la 1. */
-  header_row: number | null;
-  /** Obligatorias, con el nombre CRUDO del archivo. Sin esto la carga se niega. */
-  required_columns: string[] | null;
-  /** A descartar antes de escribir, con el nombre YA NORMALIZADO. */
-  drop_columns: string[] | null;
-};
-
 type LogStatus = 'ok' | 'validation_failed' | 'error';
 
 /**
@@ -167,7 +151,7 @@ type LogStatus = 'ok' | 'validation_failed' | 'error';
  * sync -- ver `recordSyncOutcome`. `null` si no se pudo registrar.
  */
 async function writeLog(
-  sb: Awaited<ReturnType<typeof getServerClient>>,
+  sb: UploadsClient,
   entry: {
     source_key: string;
     user_email: string;
@@ -237,78 +221,14 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
   const started = Date.now();
   const { source: sourceKey } = await ctx.params;
 
-  // ---- 1. Sesión y acceso a la app -------------------------------------
-  // El gate (proxy.ts) ya cubre esto, pero se repite acá: es la ruta que
-  // escribe, y no debe depender de que el matcher del gate siga cubriéndola.
-  let user: User | null;
-  try {
-    user = await getSessionUser();
-  } catch {
-    user = null;
-  }
+  // ---- 1 y 2. Sesión, acceso a la app, fuente asignada y su configuración
+  // Los cuatro pasos viven en `lib/uploads/authorizeSource.ts` porque el previo
+  // de columnas los necesita idénticos: si leyera otra fila de `uploads.source`
+  // mostraría columnas que la carga no va a usar.
+  const auth = await authorizeSource(sourceKey);
+  if (!auth.ok) return auth.response;
 
-  if (!user) {
-    return Response.json({ ok: false, error: 'Not authenticated' }, { status: 401 });
-  }
-  if (!hasAppAccess(user)) {
-    return Response.json({ ok: false, error: 'No access to this application' }, { status: 403 });
-  }
-
-  const userEmail = user.email;
-  if (!userEmail) {
-    return Response.json({ ok: false, error: 'Session has no email' }, { status: 403 });
-  }
-
-  const sb = await getServerClient('uploads');
-
-  // ---- 2. Esta fuente está asignada a ESTE usuario ----------------------
-  // No se confía en que la UI la haya ocultado: la lista de la UI y este
-  // chequeo son dos cosas distintas, y sólo esta segunda protege los datos.
-  // La consulta corre con la sesión del usuario, así que RLS la acota además
-  // por su cuenta.
-  const { data: assignment, error: assignmentError } = await sb
-    .from('user_source')
-    .select('source_key')
-    .eq('user_email', userEmail)
-    .eq('source_key', sourceKey)
-    .maybeSingle();
-
-  if (assignmentError) {
-    return Response.json(
-      { ok: false, error: `could not verify assignment: ${assignmentError.message}` },
-      { status: 500 },
-    );
-  }
-  if (!assignment) {
-    // 403 y no 404: existir o no la fuente no es asunto de quien no la tiene.
-    return Response.json(
-      { ok: false, error: `not authorized for source "${sourceKey}"` },
-      { status: 403 },
-    );
-  }
-
-  // Configuración de la fuente.
-  const { data: sourceRow, error: sourceError } = await sb
-    .from('source')
-    .select('*')
-    .eq('source_key', sourceKey)
-    .eq('is_active', true)
-    .maybeSingle<SourceConfig>();
-
-  if (sourceError) {
-    return Response.json(
-      { ok: false, error: `could not read source config: ${sourceError.message}` },
-      { status: 500 },
-    );
-  }
-  if (!sourceRow) {
-    return Response.json(
-      { ok: false, error: `source "${sourceKey}" is not configured or not active` },
-      { status: 404 },
-    );
-  }
-
-  const rules: SourceRules = getSourceRules(sourceKey);
+  const { userEmail, sb, sourceRow, rules } = auth.ctx;
 
   /*
    * Las columnas obligatorias ahora viven en `uploads.source`, así que una fila
@@ -334,8 +254,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
     );
   }
 
-  const headerRow = sourceRow.header_row ?? 1;
-  if (!Number.isInteger(headerRow) || headerRow < 1) {
+  const headerRow = resolveHeaderRow(sourceRow);
+  if (headerRow === null) {
     return Response.json(
       {
         ok: false,

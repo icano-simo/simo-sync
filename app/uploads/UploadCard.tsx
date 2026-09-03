@@ -38,6 +38,31 @@ type Result =
   | { kind: 'ok'; body: Record<string, unknown> }
   | { kind: 'err'; message: string; detail?: Record<string, unknown> };
 
+/** Una columna del archivo elegido, tal como la devuelve el previo. */
+type PreviewColumn = {
+  posicion: number;
+  /** Como viene en el archivo. */
+  original: string;
+  /** Como va a llamarse en BigQuery. */
+  normalizado: string;
+  se_descarta: boolean;
+};
+
+type PreviewBody = {
+  archivo: string;
+  hoja: string | null;
+  fila_encabezado: number;
+  filas: number;
+  filas_descartadas: number;
+  columnas: PreviewColumn[];
+  drop_sin_coincidencia: string[];
+};
+
+type Preview =
+  | { kind: 'loading' }
+  | { kind: 'ok'; data: PreviewBody }
+  | { kind: 'err'; message: string };
+
 /** Etiqueta y color de pill por estado. Un solo lugar para las tres variantes. */
 const STATUS_STYLE: Record<string, { label: string; className: string }> = {
   ok: { label: 'ok', className: 'pill pill--ok' },
@@ -156,18 +181,174 @@ function syncCell(entry: LoadEntry) {
   return <span className="loads__empty">—</span>;
 }
 
+/**
+ * Las columnas que trae el archivo elegido, con los dos nombres.
+ *
+ * POR QUÉ ESTÁ ACÁ. El 2 de septiembre `roster_co` necesitó cinco intentos y
+ * `hr_hiring` tres, todos por lo mismo: `uploads.source` tenía un nombre de
+ * columna que el archivo no usa, y la única forma de enterarse era fallar.
+ * 'Branch #' contra 'Branch'. 'unnamed_38' contra 'column_2'. '#' contra
+ * 'column'. Con las columnas a la vista antes de subir, esa diferencia se ve
+ * sin tener que preguntarle a nadie.
+ *
+ * Las dos columnas de la tabla se llaman "En el archivo" y "En BigQuery" y no
+ * "original" y "normalizado": lo que hace falta saber es de qué lado está cada
+ * nombre, no cómo se llama la transformación.
+ *
+ * NO OPINA. No dice si una columna falta, si sobra o si el nombre está mal.
+ * Decidir qué columna es cuál es de quien configura la fuente.
+ */
+function ColumnPreview({ data }: { data: PreviewBody }) {
+  return (
+    <>
+      {/*
+        `open` por defecto: la pantalla existe para que las columnas se VEAN,
+        no para que haya un lugar donde buscarlas. El scroll propio de la tabla
+        es lo que evita que 58 filas empujen el historial fuera de la vista.
+      */}
+      <details className="cols" open>
+        <summary className="cols__summary">
+          <strong>{data.columnas.length}</strong>
+          {data.columnas.length === 1 ? ' columna detectada' : ' columnas detectadas'}
+          {data.hoja ? ` · hoja "${data.hoja}"` : ''} · encabezado en la fila{' '}
+          {data.fila_encabezado} · {data.filas} filas
+          {data.filas_descartadas ? `, ${data.filas_descartadas} descartadas` : ''}
+        </summary>
+
+        <div className="cols__scroll">
+          <table className="cols__table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>En el archivo</th>
+                <th>En BigQuery</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.columnas.map((c) => (
+                <tr key={c.posicion}>
+                  <td className="cols__pos">{c.posicion}</td>
+                  <td>
+                    {/*
+                      Un encabezado vacío es un caso real y no un error de
+                      lectura: es de donde salen 'column' y 'column_2'. Decirlo
+                      explícitamente es lo que hace que ese nombre se entienda.
+                    */}
+                    {c.original === '' ? (
+                      <span className="cols__blank">(sin nombre)</span>
+                    ) : (
+                      c.original
+                    )}
+                  </td>
+                  <td>
+                    <code className="cols__norm">{c.normalizado}</code>
+                    {c.se_descarta ? <span className="cols__tag">se descarta</span> : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/*
+          Cuál de los dos nombres va en cuál lista. `required_columns` compara
+          contra el nombre CRUDO y `drop_columns` contra el NORMALIZADO -- dos
+          listas en la misma fila de `uploads.source` que se comparan contra
+          cosas distintas (ver la nota de `dropColumns` en lib/uploads/parse.ts).
+          Sin esta línea, tener los dos nombres a la vista igual deja que copiar
+          el equivocado, que es la mitad del problema que esta pantalla resuelve.
+        */}
+        <p className="cols__legend">
+          Al configurar la fuente: <code>required_columns</code> usa el nombre de la izquierda,{' '}
+          <code>drop_columns</code> el de la derecha.
+        </p>
+      </details>
+
+      {/*
+        Un `drop_columns` que no coincide NO FALLA: la carga sale bien y la
+        columna sensible del roster de Colombia se escribe a BigQuery igual.
+        Todos los demás desajustes de nombres se anuncian al fallar la carga;
+        éste se anuncia no pasando nada, y por eso es el único que esta pantalla
+        señala. Va FUERA del <details> para que no se pueda plegar.
+      */}
+      {data.drop_sin_coincidencia.length > 0 ? (
+        <div className="upload-result upload-result--warn">
+          <strong>
+            {data.drop_sin_coincidencia.length === 1
+              ? '1 columna configurada para descartarse no está en el archivo'
+              : `${data.drop_sin_coincidencia.length} columnas configuradas para descartarse no están en el archivo`}
+          </strong>
+          : {data.drop_sin_coincidencia.join(', ')}. Con esos nombres no coincide ninguna columna,
+          así que no se van a descartar.
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 export default function UploadCard({ source, recent }: { source: SourceRow; recent: LoadEntry[] }) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [progress, setProgress] = useState<number | null>(null);
   const [result, setResult] = useState<Result | null>(null);
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const previewAbort = useRef<AbortController | null>(null);
 
   const busy = progress !== null;
   // El <input> real está oculto y lo dispara su <label>: el control nativo no
   // se puede estilar igual entre navegadores. El id tiene que ser único porque
   // hay una tarjeta por fuente en la misma página.
   const inputId = `file-${source.source_key}`;
+
+  /**
+   * Elegir un archivo dispara el previo de columnas.
+   *
+   * El previo NO bloquea nada: si falla, se muestra como aviso y el botón de
+   * Subir sigue habilitado. Es una ayuda para ver los nombres antes de cargar,
+   * no un permiso para cargar -- la validación que decide sigue estando en la
+   * ruta de carga, que es la única que puede negarse.
+   */
+  function chooseFile(next: File | null) {
+    /*
+     * Un previo en vuelo de un archivo anterior deja de interesar: si
+     * contestara después de que se eligió otro, mostraría las columnas del
+     * archivo equivocado, y eso es peor que no mostrar nada.
+     */
+    previewAbort.current?.abort();
+    previewAbort.current = null;
+
+    setFile(next);
+    setResult(null);
+    setPreview(null);
+    if (!next) return;
+
+    const controller = new AbortController();
+    previewAbort.current = controller;
+    setPreview({ kind: 'loading' });
+
+    const form = new FormData();
+    form.append('file', next);
+
+    fetch(`/api/upload/${encodeURIComponent(source.source_key)}/preview`, {
+      method: 'POST',
+      body: form,
+      signal: controller.signal,
+    })
+      .then(async (res) => {
+        const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        if (res.ok && body.ok) {
+          setPreview({ kind: 'ok', data: body as unknown as PreviewBody });
+        } else {
+          setPreview({ kind: 'err', message: String(body.error ?? `HTTP ${res.status}`) });
+        }
+      })
+      .catch((err: unknown) => {
+        // Abortar es lo que hace `chooseFile` al cambiar de archivo: no es un fallo.
+        if (controller.signal.aborted) return;
+        setPreview({ kind: 'err', message: err instanceof Error ? err.message : String(err) });
+      });
+  }
 
   /**
    * Se usa XMLHttpRequest y no fetch a propósito: fetch no expone progreso de
@@ -208,6 +389,9 @@ export default function UploadCard({ source, recent }: { source: SourceRow; rece
       if (xhr.status >= 200 && xhr.status < 300 && body.ok) {
         setResult({ kind: 'ok', body });
         setFile(null);
+        // El previo describía un archivo que ya no está elegido: sin nombre de
+        // archivo al lado, esa lista de columnas quedaría sin contexto.
+        setPreview(null);
         if (inputRef.current) inputRef.current.value = '';
         // Refresca el Server Component para que aparezca la carga en el historial.
         router.refresh();
@@ -246,10 +430,7 @@ export default function UploadCard({ source, recent }: { source: SourceRow; rece
           type="file"
           accept=".xlsx,.csv"
           disabled={busy}
-          onChange={(e) => {
-            setFile(e.target.files?.[0] ?? null);
-            setResult(null);
-          }}
+          onChange={(e) => chooseFile(e.target.files?.[0] ?? null)}
         />
         <label htmlFor={inputId} className="btn">
           <FileSheetIcon size={14} />
@@ -263,6 +444,26 @@ export default function UploadCard({ source, recent }: { source: SourceRow; rece
 
         {file ? <span className="upload-filename">{file.name}</span> : null}
       </div>
+
+      {/*
+        Las columnas del archivo elegido, ANTES de subir. Va inmediatamente
+        debajo del control y arriba de la barra: es información sobre lo que se
+        acaba de elegir, así que se lee en el mismo movimiento.
+      */}
+      {preview?.kind === 'loading' ? (
+        <div className="upload-result">Leyendo las columnas del archivo…</div>
+      ) : null}
+
+      {preview?.kind === 'err' ? (
+        <div className="upload-result upload-result--warn">
+          No se pudieron leer las columnas: {preview.message}
+          <div className="upload-result__note">
+            Es sólo el previo — el archivo se puede subir igual.
+          </div>
+        </div>
+      ) : null}
+
+      {preview?.kind === 'ok' ? <ColumnPreview data={preview.data} /> : null}
 
       {progress !== null ? (
         <div
