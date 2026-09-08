@@ -72,26 +72,31 @@ const MAX_SNAPSHOTS_PER_DAY = 2;
  * encabezados las convierte en `loa2` y `loa_2`. Son dos columnas distintas del
  * export, y las dos traen LO Assistants del roster.
  *
- * Lo que NO son es independientes. Medido sobre la vista corregida, con 5,796
- * filas:
+ * Lo que NO son es independientes. Sobre la vista entera --todos los días,
+ * 5,796 filas-- el reparto es:
  *
- *   loan_processor   5,001
- *   loa_2            3,345
- *   loa2             2,105
- *   las dos con la MISMA persona   1,703
- *
- * Esas 1,703 son la parte que importa: como `loa2` está poblada en 2,105, la
- * mayoría de las filas que la tienen repiten el mismo nombre en `loa_2`, y las
- * que difieren de verdad son a lo sumo 402.
+ *   loan_processor            5,001
+ *   loa_2                     3,345      loa2                      2,105
+ *   sólo loa_2                1,355      sólo loa2                   115
+ *   las dos llenas            1,990
+ *     con la MISMA persona    1,703      o sea el 85.6% de las 1,990
+ *     con personas distintas    287
  *
  * CONSECUENCIA, Y ES LA ÚNICA REGLA QUE HAY QUE RECORDAR: un conteo de
- * asistentes que sume las dos columnas SIN DEDUPLICAR cuenta doble en esas
- * 1,703 filas. No es un error visible -- da un número más alto y plausible.
+ * asistentes que sume las dos columnas SIN DEDUPLICAR cuenta doble en las
+ * 1,703. No es un error visible -- da un número más alto y plausible, que es la
+ * peor clase.
  *
- * Y aun así no se pueden colapsar en una: cuando difieren son personas
- * distintas, así que un COALESCE se comería a la de `loa2` en las filas donde
- * las dos están llenas y son diferentes. Van las dos, cada una a su columna, y
- * la deduplicación es de quien cuente.
+ * Y aun así no se pueden colapsar en una: en 287 filas son personas distintas,
+ * así que un COALESCE se comería a la de `loa2`. Van las dos, cada una a su
+ * columna, y la deduplicación es de quien cuente.
+ *
+ * ⚠ ESOS NÚMEROS SON DE LA VISTA ENTERA, Y ESTE JOB ESCRIBE UN SOLO DÍA. Por
+ * snapshot la magnitud es otra, aunque la proporción se mantenga: el del
+ * 2026-09-08 trae 1,029 filas, 879 con `loan_processor`, 368 con `loa2`, 595
+ * con `loa_2`, 349 con las dos llenas y 50 con personas distintas. La app lee
+ * un snapshot activo, así que el doble conteo que puede aparecer en pantalla es
+ * del orden de las 300 filas del día, no de las 1,703.
  *
  * La que más se llena es la del guion --`loa_2` contra `loa2`-- así que quien
  * asuma que `loa_2` es la fea y `loa2` la buena elige la peor de las dos.
@@ -321,8 +326,9 @@ export async function syncPipelineSnapshot(
     est_closing_date: r.est_closing_date,
     amount: r.amount,
     loan_officer: r.loan_officer,
-    // `loa2` y `loa_2` son DOS columnas del archivo que se pisan en 1,703
-    // filas: sumarlas sin deduplicar cuenta doble. Ver la nota de `buildQuery`.
+    // `loa2` y `loa_2` son DOS columnas del archivo que se pisan en el 85.6% de
+    // las filas donde las dos están llenas: sumarlas sin deduplicar cuenta
+    // doble. Ver la nota de `buildQuery`.
     loan_processor: r.loan_processor,
     loa2: r.loa2,
     loa_2: r.loa_2,
