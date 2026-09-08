@@ -64,6 +64,49 @@ const MAX_SNAPSHOTS_PER_DAY = 2;
  * `close_month` es DATE en la vista y TEXT 'YYYY-MM' en Supabase.
  * `affinity_program` es BOOLEAN en la vista y TEXT en Supabase, donde el parser
  * guardaba la celda cruda: '' o 'true'. Se reproduce esa convención.
+ *
+ * ---------------------------------------------------------------------------
+ * ⚠ `loa2` Y `loa_2` SON DOS COLUMNAS DISTINTAS, NO UN TYPO -- PERO SE PISAN
+ * ---------------------------------------------------------------------------
+ * El archivo trae 'LOA2' sin guion y 'LOA-2' con guion, y el normalizador de
+ * encabezados las convierte en `loa2` y `loa_2`. Son dos columnas distintas del
+ * export, y las dos traen LO Assistants del roster.
+ *
+ * Lo que NO son es independientes. Medido sobre la vista corregida, con 5,796
+ * filas:
+ *
+ *   loan_processor   5,001
+ *   loa_2            3,345
+ *   loa2             2,105
+ *   las dos con la MISMA persona   1,703
+ *
+ * Esas 1,703 son la parte que importa: como `loa2` está poblada en 2,105, la
+ * mayoría de las filas que la tienen repiten el mismo nombre en `loa_2`, y las
+ * que difieren de verdad son a lo sumo 402.
+ *
+ * CONSECUENCIA, Y ES LA ÚNICA REGLA QUE HAY QUE RECORDAR: un conteo de
+ * asistentes que sume las dos columnas SIN DEDUPLICAR cuenta doble en esas
+ * 1,703 filas. No es un error visible -- da un número más alto y plausible.
+ *
+ * Y aun así no se pueden colapsar en una: cuando difieren son personas
+ * distintas, así que un COALESCE se comería a la de `loa2` en las filas donde
+ * las dos están llenas y son diferentes. Van las dos, cada una a su columna, y
+ * la deduplicación es de quien cuente.
+ *
+ * La que más se llena es la del guion --`loa_2` contra `loa2`-- así que quien
+ * asuma que `loa_2` es la fea y `loa2` la buena elige la peor de las dos.
+ *
+ * ⚠ EL NOMBRE POR EL QUE SE LAS VA A BUSCAR NO EXISTE EN EL ARCHIVO. Se
+ * pidieron como 'Role Name - LO Assistant' y 'Role Name - LO Assistant 2' --
+ * así se llaman en el reporte de Salesforce, no en el export, que las trae como
+ * LOA2 y LOA-2. Las tres columnas tienen `COMMENT ON COLUMN` en
+ * `pipeline_loans` Y en `pipeline_resolved_loans` diciendo esto mismo, para que
+ * se encuentren desde el lado del portal sin pasar por este repo.
+ *
+ * POR QUÉ ESTABAN EN CERO: la vista no las exponía. Estaban en la tabla de
+ * aterrizaje desde el principio, pero sin proyectar en `pipeline_snapshot`, así
+ * que las columnas de Supabase existían y no tenían de dónde llenarse. Se
+ * arreglaron las dos mitades: la vista arriba y esta proyección acá.
  */
 function buildQuery(): string {
   return `
@@ -92,6 +135,12 @@ function buildQuery(): string {
       v.disbursement_date,
       v.amount,
       v.loan_officer,
+      -- Las tres del equipo del préstamo. loa2 y loa_2 son DOS columnas
+      -- distintas del archivo, con personas distintas: ver la nota de arriba
+      -- antes de tocarlas. (Sin backticks: esto vive en un template literal.)
+      v.loan_processor,
+      v.loa2,
+      v.loa_2,
       v.loan_status,
       v.loan_type,
       v.loan_program,
@@ -272,6 +321,11 @@ export async function syncPipelineSnapshot(
     est_closing_date: r.est_closing_date,
     amount: r.amount,
     loan_officer: r.loan_officer,
+    // `loa2` y `loa_2` son DOS columnas del archivo que se pisan en 1,703
+    // filas: sumarlas sin deduplicar cuenta doble. Ver la nota de `buildQuery`.
+    loan_processor: r.loan_processor,
+    loa2: r.loa2,
+    loa_2: r.loa_2,
     borrower_name: r.borrower_name,
     milestone_date: r.milestone_date,
     branch_transferred: r.branch_transferred,
@@ -297,6 +351,11 @@ export async function syncPipelineSnapshot(
     status: FUNDED_FOLDERS.has(String(r.loan_folder)) ? 'funded' : 'adverse',
     borrower_name: r.borrower_name,
     loan_officer: r.loan_officer,
+    // Las mismas tres que en pipeline_loans: un prestamo resuelto tambien tuvo
+    // equipo, y la pantalla de cierres lo muestra igual que la de pipeline.
+    loan_processor: r.loan_processor,
+    loa2: r.loa2,
+    loa_2: r.loa_2,
     loan_status: r.loan_status,
     disbursement_date: r.disbursement_date,
     est_closing_date: r.est_closing_date,
