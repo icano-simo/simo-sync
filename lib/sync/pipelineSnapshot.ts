@@ -91,12 +91,30 @@ const MAX_SNAPSHOTS_PER_DAY = 2;
  * así que un COALESCE se comería a la de `loa2`. Van las dos, cada una a su
  * columna, y la deduplicación es de quien cuente.
  *
- * ⚠ ESOS NÚMEROS SON DE LA VISTA ENTERA, Y ESTE JOB ESCRIBE UN SOLO DÍA. Por
- * snapshot la magnitud es otra, aunque la proporción se mantenga: el del
- * 2026-09-08 trae 1,029 filas, 879 con `loan_processor`, 368 con `loa2`, 595
- * con `loa_2`, 349 con las dos llenas y 50 con personas distintas. La app lee
- * un snapshot activo, así que el doble conteo que puede aparecer en pantalla es
- * del orden de las 300 filas del día, no de las 1,703.
+ * ⚠ ESOS NÚMEROS SON DE LA VISTA ENTERA --siete días acumulados-- Y ESTE JOB
+ * ESCRIBE UN SOLO DÍA. La app lee un snapshot activo, así que el doble conteo
+ * que puede aparecer en pantalla es del orden de las 350 filas del día, no de
+ * las 1,703. Por snapshot:
+ *
+ *   fecha        filas  processor  loa2  loa_2  las dos  distintas  %
+ *   2026-08-28     907        795   338    525      318         46  14.47
+ *   2026-08-31     911        797   339    528      320         47  14.69
+ *   2026-09-01     917        800   342    532      323         48  14.86
+ *   2026-09-02   1,015        863   359    582      340         48  14.12
+ *   2026-09-03   1,020        870   361    585      342         49  14.33
+ *   2026-09-04   1,026        876   366    593      347         49  14.12
+ *   2026-09-08   1,029        879   368    595      349         50  14.33
+ *
+ * LA PROPORCIÓN ES ESTABLE, y eso la vuelve útil como detector: no es una
+ * coincidencia del día, es cómo se llena el campo. Si algún día se mueve mucho,
+ * cambió la forma de registrar a los asistentes -- no es ruido.
+ *
+ * ⚠ PERO EL RANGO ES 14.1 A 14.9, NO 14.3 A 14.5. La diferencia importa para
+ * quien ponga una alerta: con la banda angosta, tres de estos siete días la
+ * disparan --el 2026-09-01 con 14.86 y los dos de 14.12-- o sea que avisaría de
+ * días que ya pasaron y estuvieron bien. Es el mismo error que verificar por
+ * "233 filas": un umbral más ajustado que la variación normal entrena a
+ * ignorarlo. Décimas son normales; un par de puntos es señal.
  *
  * La que más se llena es la del guion --`loa_2` contra `loa2`-- así que quien
  * asuma que `loa_2` es la fea y `loa2` la buena elige la peor de las dos.
