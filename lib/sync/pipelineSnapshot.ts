@@ -64,6 +64,33 @@ const MAX_SNAPSHOTS_PER_DAY = 2;
  * `close_month` es DATE en la vista y TEXT 'YYYY-MM' en Supabase.
  * `affinity_program` es BOOLEAN en la vista y TEXT en Supabase, donde el parser
  * guardaba la celda cruda: '' o 'true'. Se reproduce esa convención.
+ *
+ * ---------------------------------------------------------------------------
+ * ⚠ `loa2` Y `loa_2` SON DOS COLUMNAS DISTINTAS, NO UN TYPO
+ * ---------------------------------------------------------------------------
+ * El archivo trae 'LOA2' sin guion y 'LOA-2' con guion, y el normalizador de
+ * encabezados las convierte en `loa2` y `loa_2`. Traen PERSONAS DIFERENTES:
+ * LOA2 tiene a Monica Fernandez e Igleth Mercado, LOA-2 a Claudia Velasco y
+ * Daniela Esguerra. Las cuatro son LO Assistants del roster.
+ *
+ * Y la que más se llena es la del guion: `loa_2` ~58% del stage contra `loa2`
+ * ~37%. O sea que quien asuma que `loa_2` es la fea y `loa2` la buena elige la
+ * peor de las dos.
+ *
+ * Colapsarlas con un COALESCE perdería a la mitad de las asistentes, y borrar
+ * una de las dos como "duplicada" perdería a dos personas. Van las dos, cada
+ * una a su columna.
+ *
+ * ⚠ EL NOMBRE POR EL QUE SE LAS VA A BUSCAR NO EXISTE EN EL ARCHIVO. Se
+ * pidieron como 'Role Name - LO Assistant' y 'Role Name - LO Assistant 2' --
+ * así se llaman en el reporte de Salesforce, no en el export, que las trae como
+ * LOA2 y LOA-2. Las tres columnas tienen `COMMENT ON COLUMN` en
+ * `pipeline_forecast.pipeline_loans` diciendo esto mismo, para que nadie las
+ * busque por el nombre equivocado desde el lado del portal.
+ *
+ * Las tres --`loan_processor` incluida-- existían en Supabase y estaban en
+ * CERO: el job no las proyectaba. Vacías por omisión del mapeo, no por falta de
+ * dato: `loan_processor` está poblada en ~87% del stage.
  */
 function buildQuery(): string {
   return `
@@ -92,6 +119,12 @@ function buildQuery(): string {
       v.disbursement_date,
       v.amount,
       v.loan_officer,
+      -- Las tres del equipo del préstamo. loa2 y loa_2 son DOS columnas
+      -- distintas del archivo, con personas distintas: ver la nota de arriba
+      -- antes de tocarlas. (Sin backticks: esto vive en un template literal.)
+      v.loan_processor,
+      v.loa2,
+      v.loa_2,
       v.loan_status,
       v.loan_type,
       v.loan_program,
@@ -272,6 +305,10 @@ export async function syncPipelineSnapshot(
     est_closing_date: r.est_closing_date,
     amount: r.amount,
     loan_officer: r.loan_officer,
+    // `loa2` y `loa_2` son DOS columnas del archivo, con personas distintas.
+    loan_processor: r.loan_processor,
+    loa2: r.loa2,
+    loa_2: r.loa_2,
     borrower_name: r.borrower_name,
     milestone_date: r.milestone_date,
     branch_transferred: r.branch_transferred,
@@ -297,6 +334,11 @@ export async function syncPipelineSnapshot(
     status: FUNDED_FOLDERS.has(String(r.loan_folder)) ? 'funded' : 'adverse',
     borrower_name: r.borrower_name,
     loan_officer: r.loan_officer,
+    // Las mismas tres que en pipeline_loans: un prestamo resuelto tambien tuvo
+    // equipo, y la pantalla de cierres lo muestra igual que la de pipeline.
+    loan_processor: r.loan_processor,
+    loa2: r.loa2,
+    loa_2: r.loa_2,
     loan_status: r.loan_status,
     disbursement_date: r.disbursement_date,
     est_closing_date: r.est_closing_date,
