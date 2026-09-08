@@ -66,31 +66,47 @@ const MAX_SNAPSHOTS_PER_DAY = 2;
  * guardaba la celda cruda: '' o 'true'. Se reproduce esa convención.
  *
  * ---------------------------------------------------------------------------
- * ⚠ `loa2` Y `loa_2` SON DOS COLUMNAS DISTINTAS, NO UN TYPO
+ * ⚠ `loa2` Y `loa_2` SON DOS COLUMNAS DISTINTAS, NO UN TYPO -- PERO SE PISAN
  * ---------------------------------------------------------------------------
  * El archivo trae 'LOA2' sin guion y 'LOA-2' con guion, y el normalizador de
- * encabezados las convierte en `loa2` y `loa_2`. Traen PERSONAS DIFERENTES:
- * LOA2 tiene a Monica Fernandez e Igleth Mercado, LOA-2 a Claudia Velasco y
- * Daniela Esguerra. Las cuatro son LO Assistants del roster.
+ * encabezados las convierte en `loa2` y `loa_2`. Son dos columnas distintas del
+ * export, y las dos traen LO Assistants del roster.
  *
- * Y la que más se llena es la del guion: `loa_2` ~58% del stage contra `loa2`
- * ~37%. O sea que quien asuma que `loa_2` es la fea y `loa2` la buena elige la
- * peor de las dos.
+ * Lo que NO son es independientes. Medido sobre la vista corregida, con 5,796
+ * filas:
  *
- * Colapsarlas con un COALESCE perdería a la mitad de las asistentes, y borrar
- * una de las dos como "duplicada" perdería a dos personas. Van las dos, cada
- * una a su columna.
+ *   loan_processor   5,001
+ *   loa_2            3,345
+ *   loa2             2,105
+ *   las dos con la MISMA persona   1,703
+ *
+ * Esas 1,703 son la parte que importa: como `loa2` está poblada en 2,105, la
+ * mayoría de las filas que la tienen repiten el mismo nombre en `loa_2`, y las
+ * que difieren de verdad son a lo sumo 402.
+ *
+ * CONSECUENCIA, Y ES LA ÚNICA REGLA QUE HAY QUE RECORDAR: un conteo de
+ * asistentes que sume las dos columnas SIN DEDUPLICAR cuenta doble en esas
+ * 1,703 filas. No es un error visible -- da un número más alto y plausible.
+ *
+ * Y aun así no se pueden colapsar en una: cuando difieren son personas
+ * distintas, así que un COALESCE se comería a la de `loa2` en las filas donde
+ * las dos están llenas y son diferentes. Van las dos, cada una a su columna, y
+ * la deduplicación es de quien cuente.
+ *
+ * La que más se llena es la del guion --`loa_2` contra `loa2`-- así que quien
+ * asuma que `loa_2` es la fea y `loa2` la buena elige la peor de las dos.
  *
  * ⚠ EL NOMBRE POR EL QUE SE LAS VA A BUSCAR NO EXISTE EN EL ARCHIVO. Se
  * pidieron como 'Role Name - LO Assistant' y 'Role Name - LO Assistant 2' --
  * así se llaman en el reporte de Salesforce, no en el export, que las trae como
  * LOA2 y LOA-2. Las tres columnas tienen `COMMENT ON COLUMN` en
- * `pipeline_forecast.pipeline_loans` diciendo esto mismo, para que nadie las
- * busque por el nombre equivocado desde el lado del portal.
+ * `pipeline_loans` Y en `pipeline_resolved_loans` diciendo esto mismo, para que
+ * se encuentren desde el lado del portal sin pasar por este repo.
  *
- * Las tres --`loan_processor` incluida-- existían en Supabase y estaban en
- * CERO: el job no las proyectaba. Vacías por omisión del mapeo, no por falta de
- * dato: `loan_processor` está poblada en ~87% del stage.
+ * POR QUÉ ESTABAN EN CERO: la vista no las exponía. Estaban en la tabla de
+ * aterrizaje desde el principio, pero sin proyectar en `pipeline_snapshot`, así
+ * que las columnas de Supabase existían y no tenían de dónde llenarse. Se
+ * arreglaron las dos mitades: la vista arriba y esta proyección acá.
  */
 function buildQuery(): string {
   return `
@@ -305,7 +321,8 @@ export async function syncPipelineSnapshot(
     est_closing_date: r.est_closing_date,
     amount: r.amount,
     loan_officer: r.loan_officer,
-    // `loa2` y `loa_2` son DOS columnas del archivo, con personas distintas.
+    // `loa2` y `loa_2` son DOS columnas del archivo que se pisan en 1,703
+    // filas: sumarlas sin deduplicar cuenta doble. Ver la nota de `buildQuery`.
     loan_processor: r.loan_processor,
     loa2: r.loa2,
     loa_2: r.loa_2,
