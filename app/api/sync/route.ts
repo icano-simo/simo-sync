@@ -458,7 +458,25 @@ const SYNCS: TableSync[] = [
      * INVARIANTES de estas tres, comprobados el 2026-09-08 sobre 4,916 filas:
      *   `nppm_realtor_code IS NOT NULL` implica `nppm_display_name IS NOT NULL`
      *     -- un código sin nombre para mostrar dejaría la pantalla en blanco.
-     *   10 realtors distintos entre los 92 préstamos con código.
+     *   10 realtors distintos entre los 92 préstamos con `strategy = 'NPPM'`.
+     *
+     * ⚠ Y HAY DOS CONTEOS DE `nppm_realtor_code`, NO UNO. Los dos son correctos
+     * y confundirlos hace parecer que la resolución se rompió:
+     *
+     *   COUNT(*) WHERE nppm_realtor_code IS NOT NULL             241 filas
+     *   COUNT(*) WHERE strategy = 'NPPM' AND code IS NOT NULL     92 filas
+     *
+     * La diferencia son préstamos de OTRAS estrategias cuyo realtor igual es un
+     * NPPM: el código se resuelve para cualquier fila que traiga realtor, no
+     * sólo para las de esa estrategia. Contar realtors sobre las 241 da 29
+     * distintos; sobre las 92, da 10.
+     *
+     * Cuando la vista se reescribió, el 29 apareció donde antes había 10 y por
+     * un momento pareció que los nombres se habían vuelto a partir -- 92
+     * préstamos entre 29 realtors baja el promedio de 9 a 3 por persona, que en
+     * pantalla se lee como productividad repartida. No era eso: eran dos
+     * medidas distintas. El que hay que mirar para juzgar la RESOLUCIÓN es el de
+     * 10, acotado a la estrategia.
      *
      * INVARIANTE: `counts_for_division` implica `is_closed`, nunca al revés --
      * o sea `COUNTIF(counts_for_division AND NOT is_closed) = 0`. Comprobado el
