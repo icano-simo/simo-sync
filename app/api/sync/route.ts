@@ -407,6 +407,59 @@ const SYNCS: TableSync[] = [
      * OJO AL AGREGAR: `counts_for_division` es la columna para totales de
      * división; `is_closed` es sólo para el detalle de una sucursal.
      *
+     * ------------------------------------------------------------------------
+     * LA IDENTIDAD DEL REALTOR NPPM: `nppm_realtor_code`, NO EL NOMBRE
+     * ------------------------------------------------------------------------
+     * ⚠ LA FUENTE SIGUE SIENDO `fct_commercial_activity`, LA VISTA BASE, y no
+     * una de sus variantes. Las tres columnas aparecieron primero en
+     * `_v2` y ahora están también en la base, que es superset de aquélla.
+     *
+     * Apuntar a `_v2` habría funcionado igual, y aun así es peor: `_v2` y
+     * `_nppm` son duplicaciones pendientes de consolidar, así que un spec
+     * apuntado a una de ellas hay que migrarlo cuando desaparezcan. La base es
+     * el único nombre que no se va a mover.
+     *
+     * `nppm_realtor` llega CRUDO de Salesforce, sin normalizar en ningún punto
+     * de la cadena: hay 'FRED A GOMEZ' en mayúsculas con inicial del medio al
+     * lado de nombres en formato normal, y 'Jose Boggio' contra 'Jose A Boggio'
+     * en el mismo préstamo. Agrupar por ese texto parte a una persona en varias.
+     *
+     * Las tres columnas van juntas y NINGUNA SOBRA:
+     *
+     *   nppm_realtor_code      la clave estable. Sale de
+     *                          `lending_marts.dim_nppm_realtor_v2` y no cambia
+     *                          nunca -- ni cuando la persona entra al roster ni
+     *                          cuando alguien corrige la grafía arriba. Es lo
+     *                          único por lo que se joinea.
+     *   nppm_display_name      el nombre para mostrar, el de la dimensión y no
+     *                          el crudo. Guardar el crudo reproduciría el
+     *                          desorden que el código vino a resolver.
+     *   nppm_realtor_efectivo  el nombre con el COALESCE ya aplicado. Es el que
+     *                          `outlook.nppm_benchmark` necesita para su
+     *                          `nppm_realtor`, que sigue siendo NOT NULL, y el
+     *                          que permite reconocer una fila si hay que
+     *                          auditar. Usar `nppm_realtor` para eso dejaría
+     *                          vacías las tres filas del respaldo.
+     *
+     * ⚠ EL CÓDIGO SE RESUELVE DEL COALESCE, NO DE `nppm_realtor` A SECAS. Tres
+     * préstamos del branch 733 --dos de Santiago Jaraba Chacon y uno de Ana
+     * Hardy-- tienen `nppm_realtor` vacío y su realtor en
+     * `referred_by_realtor`. Los tres resuelven. Si el código saliera del campo
+     * principal a secas, esos tres caerían en 'unassigned realtor' SIN QUE NADA
+     * FALLE, deshaciendo la regla de respaldo que el portal ya tenía.
+     *
+     * ⚠ HAY UN HUECO DE LA FUENTE, Y NO SE TAPA ACÁ. Walter Mena tiene 2
+     * préstamos marcados NPPM y no está en la dimensión, así que su
+     * `nppm_realtor_code` es NULL y esos dos caen en 'unassigned realtor'. Eso
+     * es correcto: falta registrarlo como realtor NPPM en Salesforce, y
+     * inventarle un código acá escondería el hueco en vez de mostrarlo. De ahí
+     * que sean 92 de 94 con código y no 94.
+     *
+     * INVARIANTES de estas tres, comprobados el 2026-09-08 sobre 4,916 filas:
+     *   `nppm_realtor_code IS NOT NULL` implica `nppm_display_name IS NOT NULL`
+     *     -- un código sin nombre para mostrar dejaría la pantalla en blanco.
+     *   10 realtors distintos entre los 92 préstamos con código.
+     *
      * INVARIANTE: `counts_for_division` implica `is_closed`, nunca al revés --
      * o sea `COUNTIF(counts_for_division AND NOT is_closed) = 0`. Comprobado el
      * 2026-09-03. Los absolutos se mueven con cada carga (466 contra 461 al
@@ -467,6 +520,16 @@ const SYNCS: TableSync[] = [
       'referred_by_realtor',
       'buyers_agent',
       'nppm_realtor',
+      /*
+       * LA IDENTIDAD DEL REALTOR NPPM, resuelta arriba. Las tres van juntas y
+       * ninguna sobra -- ver la nota del spec.
+       *   nppm_realtor_efectivo  el nombre con el COALESCE ya aplicado
+       *   nppm_realtor_code      la clave estable, y la unica que se joinea
+       *   nppm_display_name      el nombre para mostrar
+       */
+      'nppm_realtor_efectivo',
+      'nppm_realtor_code',
+      'nppm_display_name',
       'realtor_es_nppm',
       'nppm_recruited_by',
       'opportunity_owner',
