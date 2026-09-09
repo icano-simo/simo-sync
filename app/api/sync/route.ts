@@ -7,11 +7,12 @@
  * never used: an upsert leaves no window where the table is empty, which
  * matters because these tables are read by live apps.
  *
- * Ten tables across three schemas -- b2b_metrics (Salesforce),
+ * Eleven tables across three schemas -- b2b_metrics (Salesforce),
  * activity_report (Encompass + Salesforce, más el reclutamiento de Loan
  * Officers y la unión de los dos pipelines de contratación) y org (roster de
- * RRHH y tablero de contrataciones). El snapshot de pipeline, que corre aparte
- * al final y no usa `syncTable`, es el undécimo destino.
+ * RRHH, tablero de contrataciones y los nombres de loan officer resueltos). El
+ * snapshot de pipeline, que corre aparte al final y no usa `syncTable`, es el
+ * duodécimo destino.
  *
  * Order of operations is deliberate:
  *   1. authorize  2. freshness gate  3. write  4. sweep  5. verify by counting
@@ -121,10 +122,21 @@ const SWEEPABLE = new Set([
    */
   'activity_report.future_loan_officer',
   /*
+   * Espejo de las grafías de loan officer que trae Encompass. Un nombre que
+   * desaparece arriba es un loan officer que ya no aparece en el export, y esta
+   * tabla no guarda nada propio: sus doce columnas son todas derivadas.
+   *
+   * ⚠ NO CONFUNDIR CON EL ROSTER, dos párrafos abajo. Acá el grano es UNA
+   * GRAFÍA, no una persona: si una grafía deja de usarse, lo que se va es una
+   * forma de escribir un nombre, y la persona sigue en `roster_current` con su
+   * `person_code`. Ahí sí, borrar sería perder a alguien.
+   */
+  'org.loan_officer_resolved',
+  /*
    * ⚠ `org.roster_current` NO ESTÁ ACÁ, Y NO ES UN OLVIDO.
    *
    * El sweep borra las filas que no volvieron a aparecer arriba. Para las otras
-   * nueve tablas eso es exactamente lo que se quiere: son espejos de su fuente.
+   * diez tablas eso es exactamente lo que se quiere: son espejos de su fuente.
    * Para el roster, borrar a quien desapareció del archivo choca con dos cosas
    * que ya están decididas:
    *
@@ -964,6 +976,125 @@ const SYNCS: TableSync[] = [
       'confianza',
       'producira',
       'es_nppm',
+    ].join(', '),
+  },
+  {
+    /*
+     * ========================================================================
+     * NOMBRES DE LOAN OFFICER, RESUELTOS
+     * ========================================================================
+     *
+     * 72 grafías crudas de Encompass que colapsan a 43 personas. 12 columnas
+     * más `synced_at`. Tercera tabla del job en el schema `org`.
+     *
+     * ------------------------------------------------------------------------
+     * POR QUÉ EXISTE: HABÍA DOS TABLAS DE EQUIVALENCIAS DESINCRONIZÁNDOSE
+     * ------------------------------------------------------------------------
+     *   hr_centralizado.person_name_key   523 grafías / 111 personas  canónica
+     *   org.employee_alias (Supabase)     378 / 127                   por detrás
+     *
+     * La de Supabase se llenaba A MANO, fila por fila, y cada grafía nueva se
+     * descubría sólo cuando algo no resolvía. Con esta tabla la app recibe el
+     * `person_code` ya resuelto y no empareja por nombre en ningún punto.
+     *
+     * TRES CASOS QUE LA JUSTIFICAN, y ninguno falla de forma visible:
+     *
+     *   Ana Manjarres   Salesforce escribe 'Manjarrez' con Z y el roster
+     *                   'Manjarres' con S. Una vista de Forecast la partió en
+     *                   dos filas.
+     *   Susan Aguilar   'Susan  Aguilar' con DOBLE ESPACIO y 'Susan Aguilar':
+     *                   dos filas para una persona, 13 préstamos repartidos.
+     *   Karen De Fex    'De Fex' y 'de Fex', 407 filas.
+     *
+     * Los tres producen números plausibles y equivocados: una persona partida
+     * en dos suma igual en el total y aparece dos veces en el detalle.
+     *
+     * ------------------------------------------------------------------------
+     * LA CLAVE ES LA GRAFÍA, NO LA PERSONA, Y ES A PROPÓSITO
+     * ------------------------------------------------------------------------
+     * El grano de esta tabla es UNA GRAFÍA CRUDA, así que la clave de conflicto
+     * es `loan_officer_name`. `match_key` NO puede serlo: es justamente lo que
+     * comparten las grafías de una misma persona, así que las dos filas de
+     * Susan Aguilar colisionarían en la misma tanda y Postgres rechazaría el
+     * batch entero -- el problema que ya tuvo `realtor_owner_map`.
+     *
+     * Por eso 72 filas y no 43: Susan aporta dos, y eso no es un duplicado a
+     * limpiar. Es el mapa de las formas en que Encompass escribe los nombres, y
+     * su utilidad depende de que estén TODAS.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ UN `person_code` NULL NO ES UN ERROR
+     * ------------------------------------------------------------------------
+     * Encompass trae loan officers de todos los branches de Supreme, así que 28
+     * de las 72 grafías son PERSONAS REALES FUERA DE LA DIVISIÓN. No tienen
+     * `person_code` porque no están en nuestro roster, y eso es correcto.
+     *
+     * `es_de_la_division` dice cuáles son cuáles, y EL SYNC NO LAS FILTRA: se
+     * cargan las 72. Filtrar acá dejaría a la app sin poder distinguir un
+     * nombre mal escrito de un loan officer de otro branch -- dos problemas
+     * distintos con dos respuestas distintas.
+     *
+     * ⚠ ES LO CONTRARIO DE `roster_us`, donde el filtro de división SÍ va en el
+     * cargador. Allá se filtran FILAS DE PERSONAS que no deben entrar a
+     * BigQuery; acá se conserva un MAPA DE NOMBRES cuyo valor está en ser
+     * completo. La diferencia no es de criterio sino de qué es cada fila.
+     *
+     * ------------------------------------------------------------------------
+     * QUÉ VERIFICAR DESPUÉS DE UNA CORRIDA
+     * ------------------------------------------------------------------------
+     * INVARIANTES, no conteos: Encompass agrega grafías cada vez que alguien
+     * escribe un nombre distinto, así que "72 filas" falla con la primera
+     * variante nueva -- y falla pareciendo un problema del mapeo.
+     *
+     *   COUNT(*) = COUNT(DISTINCT loan_officer_name), sin nulos ni vacíos. Es
+     *     lo que hace que sirva de clave de conflicto.
+     *   `es_de_la_division` = (`person_code` IS NOT NULL) en TODA fila. Si se
+     *     separan, o hay alguien de la división sin resolver o se le asignó un
+     *     `person_code` a alguien de afuera.
+     *   Cada `match_key` tiene UN SOLO `person_code` distinto. Dos personas
+     *     detrás de la misma clave de emparejamiento es el bug que esta tabla
+     *     viene a evitar, no uno que pueda tolerar.
+     *   `nombre_canonico`, `branch_del_roster`, `cargo` y las tres banderas,
+     *     pobladas exactamente donde hay `person_code`: salen del roster, así
+     *     que sin persona no hay de dónde sacarlas.
+     *   El conteo de Supabase contra el de BigQuery, que `syncTable` ya compara.
+     *
+     * Al escribir esto: 72 filas, 44 con `es_de_la_division` y 43 `person_code`
+     * distintos entre esas 44 -- la diferencia es Susan Aguilar, con sus dos
+     * grafías. Esos tres números son la foto del día, no el criterio.
+     *
+     * ⚠ NINGUNO DE ESOS TRES ESTÁ VERIFICADO DE PRIMERA MANO. Los conectores de
+     * BigQuery y Supabase estaban caídos al escribir este spec, así que vienen
+     * del reporte de la usuaria. Sin comprobar quedan también que la vista
+     * exponga los 12 nombres tal cual y que el destino los tenga. El modo de
+     * fallo es ruidoso y del lado correcto -- BigQuery rechaza la consulta
+     * diciendo qué columna no existe, o PostgREST rechaza el upsert -- y esta
+     * tabla falla aislada de las otras diez.
+     */
+    name: 'loan_officer_resolved',
+    source: 'lending_marts.dim_loan_officer_resolved',
+    target: 'loan_officer_resolved',
+    schema: 'org',
+    conflict: 'loan_officer_name',
+    // Las 12 listadas, no `*`: ver la nota de `lo_recruitment`.
+    select: [
+      // La grafía cruda de Encompass. Es la clave.
+      'loan_officer_name',
+      // Lo que comparten las grafías de una misma persona. NO es la clave.
+      'match_key',
+      'prestamos',
+      'cierres',
+      // NULL en las 28 de fuera de la división. No es un error.
+      'person_code',
+      // Las seis del roster: pobladas sólo donde hay `person_code`.
+      'nombre_canonico',
+      'branch_del_roster',
+      'cargo',
+      'is_active',
+      'is_producer',
+      'is_nppm_realtor',
+      // Lo único que distingue "no resuelve" de "no es nuestro".
+      'es_de_la_division',
     ].join(', '),
   },
 ];
