@@ -410,9 +410,14 @@ const SYNCS: TableSync[] = [
      * ------------------------------------------------------------------------
      * LA IDENTIDAD DEL REALTOR NPPM: `nppm_realtor_code`, NO EL NOMBRE
      * ------------------------------------------------------------------------
-     * La fuente pasa a `fct_commercial_activity_v2`, que es la misma vista más
-     * tres columnas -- verificado: superset exacto, 90 columnas iguales y 3
-     * nuevas, ninguna faltante.
+     * ⚠ LA FUENTE SIGUE SIENDO `fct_commercial_activity`, LA VISTA BASE, y no
+     * una de sus variantes. Las tres columnas aparecieron primero en
+     * `_v2` y ahora están también en la base, que es superset de aquélla.
+     *
+     * Apuntar a `_v2` habría funcionado igual, y aun así es peor: `_v2` y
+     * `_nppm` son duplicaciones pendientes de consolidar, así que un spec
+     * apuntado a una de ellas hay que migrarlo cuando desaparezcan. La base es
+     * el único nombre que no se va a mover.
      *
      * `nppm_realtor` llega CRUDO de Salesforce, sin normalizar en ningún punto
      * de la cadena: hay 'FRED A GOMEZ' en mayúsculas con inicial del medio al
@@ -465,7 +470,7 @@ const SYNCS: TableSync[] = [
      * falle.
      */
     name: 'commercial_activity',
-    source: 'lending_marts.fct_commercial_activity_v2',
+    source: 'lending_marts.fct_commercial_activity',
     target: 'loan_records_v2',
     schema: 'activity_report',
     conflict: 'loan_number',
