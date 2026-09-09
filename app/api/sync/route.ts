@@ -1047,7 +1047,7 @@ const SYNCS: TableSync[] = [
      * NOMBRES DE LOAN OFFICER, RESUELTOS
      * ========================================================================
      *
-     * 72 grafías crudas de Encompass que colapsan a 43 personas. 12 columnas
+     * 72 grafías crudas de Encompass que colapsan a 43 personas. 13 columnas
      * más `synced_at`. Tercera tabla del job en el schema `org`.
      *
      * ------------------------------------------------------------------------
@@ -1101,6 +1101,18 @@ const SYNCS: TableSync[] = [
      * hay", y es el mismo tipo de falla que la tabla vino a arreglar -- una
      * persona contada dos veces. Sólo que del otro lado.
      *
+     * ⚠ Y PARA FILTRAR ACTIVOS VA `is_active`, NO `es_de_la_division`. Son dos
+     * preguntas distintas y hay una fila que las separa: Isabel Wagner es de la
+     * división --tiene `person_code`, 13 préstamos y 2 cierres-- y ya no está en
+     * el roster. Un scorecard de loan officers activos que filtre por
+     * `es_de_la_division` la incluye; uno que filtre por `is_active` no.
+     *
+     * Las tres columnas contestan tres cosas que conviene no mezclar:
+     *   es_de_la_division        ¿es nuestra, o de otro branch de Supreme?
+     *   is_active               ¿trabaja hoy acá?
+     *   ya_no_esta_en_el_roster  ¿trabajaba y se fue? -- lo que distingue eso de
+     *                            "nunca estuvo", que es el caso de las 28.
+     *
      * ------------------------------------------------------------------------
      * ⚠ UN `person_code` NULL NO ES UN ERROR
      * ------------------------------------------------------------------------
@@ -1133,26 +1145,44 @@ const SYNCS: TableSync[] = [
      *   Cada `match_key` tiene UN SOLO `person_code` distinto. Dos personas
      *     detrás de la misma clave de emparejamiento es el bug que esta tabla
      *     viene a evitar, no uno que pueda tolerar.
-     *   `nombre_canonico`, `branch_del_roster`, `cargo` y las tres banderas,
-     *     pobladas exactamente donde hay `person_code`: salen del roster, así
-     *     que sin persona no hay de dónde sacarlas.
+     *   `nombre_canonico` poblado en TODA fila con `person_code`. Sale de
+     *     `dim_person_all`, que conserva a todos los vistos alguna vez, así que
+     *     resolver implica tener nombre.
+     *   `branch_del_roster`, `cargo` y las tres banderas, pobladas donde hay
+     *     `person_code` Y NOT `ya_no_esta_en_el_roster`. Ésas SÍ salen del
+     *     roster, y quien ya salió no las tiene.
+     *   `ya_no_esta_en_el_roster` implica `person_code IS NOT NULL`: la columna
+     *     dice que la persona se fue, no que no se la reconoce.
      *   El conteo de Supabase contra el de BigQuery, que `syncTable` ya compara.
      *
-     * Al escribir esto: 72 filas, 44 con `es_de_la_division` y 43 `person_code`
-     * distintos entre esas 44 -- la diferencia es Susan Aguilar, con sus dos
-     * grafías. Esos tres números son la foto del día, no el criterio.
+     * ⚠ ESE DESDOBLE ES UNA CORRECCIÓN, no un detalle. La versión anterior
+     * pedía las seis columnas del roster pobladas donde hubiera `person_code`, y
+     * eso NO ES CIERTO para quien salió: Isabel Wagner resolvía a
+     * `isabel.wagner` con `nombre_canonico` NULL, porque `roster_for_admin` ya
+     * no la nombra. Un scorecard le habría mostrado un blanco. Con
+     * `nombre_canonico` cayendo a `dim_person_all` y las otras cinco acotadas a
+     * quien sigue en el roster, el invariante vuelve a ser cierto -- y si se
+     * hubiera dejado como estaba, habría fallado siempre y se habría aprendido a
+     * ignorarlo.
      *
-     * Comprobado el 2026-09-09, antes de mergear: las 12 columnas coinciden
-     * exactas entre la vista y el destino y en el mismo orden, sin renombres; la
-     * tabla tiene su PK sobre `loan_officer_name`, `service_role` con DELETE
-     * --que el barrido necesita-- y `authenticated` con SELECT.
+     * Al escribir esto: 72 filas, 44 con `es_de_la_division`, 43 `person_code`
+     * distintos entre esas 44 --la diferencia es Susan Aguilar, con sus dos
+     * grafías-- y 1 con `ya_no_esta_en_el_roster`, que es Isabel Wagner: la
+     * única con producción histórica que ya salió. Esos números son la foto del
+     * día, no el criterio.
+     *
+     * Comprobado el 2026-09-09: las columnas coinciden exactas entre la vista y
+     * el destino y en el mismo orden, sin renombres; la tabla tiene su PK sobre
+     * `loan_officer_name`, `service_role` con DELETE --que el barrido
+     * necesita-- y `authenticated` con SELECT. Los cuatro invariantes de arriba
+     * pasan sobre las 72 filas.
      */
     name: 'loan_officer_resolved',
     source: 'lending_marts.dim_loan_officer_resolved',
     target: 'loan_officer_resolved',
     schema: 'org',
     conflict: 'loan_officer_name',
-    // Las 12 listadas, no `*`: ver la nota de `lo_recruitment`.
+    // Las 13 listadas, no `*`: ver la nota de `lo_recruitment`.
     select: [
       // La grafía cruda de Encompass. Es la clave.
       'loan_officer_name',
@@ -1171,6 +1201,8 @@ const SYNCS: TableSync[] = [
       'is_nppm_realtor',
       // Lo único que distingue "no resuelve" de "no es nuestro".
       'es_de_la_division',
+      // Y lo único que distingue "ya no está" de "nunca estuvo". Ver la nota.
+      'ya_no_esta_en_el_roster',
     ].join(', '),
   },
 ];
