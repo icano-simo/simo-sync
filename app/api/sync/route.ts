@@ -1022,6 +1022,22 @@ const SYNCS: TableSync[] = [
      * limpiar. Es el mapa de las formas en que Encompass escribe los nombres, y
      * su utilidad depende de que estén TODAS.
      *
+     * ⚠ Y ES LO QUE HAY QUE CUIDAR AL CONSUMIRLA. Que el grano sea la grafía
+     * decide cómo se cuenta:
+     *
+     *   unir `loan_records_v2` por `loan_officer_name`   BIEN. Una fila por
+     *                                                    nombre, sin abanicar.
+     *   COUNT(*) sobre esta tabla                        cuenta GRAFÍAS, no
+     *                                                    personas: hoy daría 72
+     *                                                    loan officers donde
+     *                                                    hay 43.
+     *   COUNT(DISTINCT person_code)                      así se cuentan
+     *                                                    personas.
+     *
+     * El error no avisa: 72 es un número plausible para "cuántos loan officers
+     * hay", y es el mismo tipo de falla que la tabla vino a arreglar -- una
+     * persona contada dos veces. Sólo que del otro lado.
+     *
      * ------------------------------------------------------------------------
      * ⚠ UN `person_code` NULL NO ES UN ERROR
      * ------------------------------------------------------------------------
@@ -1063,13 +1079,10 @@ const SYNCS: TableSync[] = [
      * distintos entre esas 44 -- la diferencia es Susan Aguilar, con sus dos
      * grafías. Esos tres números son la foto del día, no el criterio.
      *
-     * ⚠ NINGUNO DE ESOS TRES ESTÁ VERIFICADO DE PRIMERA MANO. Los conectores de
-     * BigQuery y Supabase estaban caídos al escribir este spec, así que vienen
-     * del reporte de la usuaria. Sin comprobar quedan también que la vista
-     * exponga los 12 nombres tal cual y que el destino los tenga. El modo de
-     * fallo es ruidoso y del lado correcto -- BigQuery rechaza la consulta
-     * diciendo qué columna no existe, o PostgREST rechaza el upsert -- y esta
-     * tabla falla aislada de las otras diez.
+     * Comprobado el 2026-09-09, antes de mergear: las 12 columnas coinciden
+     * exactas entre la vista y el destino y en el mismo orden, sin renombres; la
+     * tabla tiene su PK sobre `loan_officer_name`, `service_role` con DELETE
+     * --que el barrido necesita-- y `authenticated` con SELECT.
      */
     name: 'loan_officer_resolved',
     source: 'lending_marts.dim_loan_officer_resolved',
