@@ -23,15 +23,32 @@
 --
 -- ⚠ HAY QUE ANADIR `comp` A `pgrst.db_schemas` O POSTGREST NO LO VE.
 --
--- Se hace en el panel de Supabase, en Settings -> API -> Exposed schemas, y NO
--- desde este archivo: la lista vive en la configuracion de la API y no en la
--- base, asi que ningun SQL la cambia. Una tabla que existe y no esta expuesta
--- falla con "Could not find the table ... in the schema cache", que se lee como
--- "la tabla no existe" y manda a buscar al lugar equivocado.
+-- Es un ajuste del ROL `authenticator`, en la base, y se cambia con SQL:
+--
+--   alter role authenticator set pgrst.db_schemas =
+--     'public, b2b_metrics, ..., comp';
+--   notify pgrst, 'reload config';
+--
+-- Hay que reescribir la lista ENTERA, porque `set` reemplaza y no anade: leerla
+-- primero no es opcional. Se lee asi, que es tambien como se comprueba despues:
+--
+--   select setconfig from pg_db_role_setting s
+--   join pg_roles r on r.oid = s.setrole
+--   where r.rolname = 'authenticator';
+--
+-- Una tabla que existe y no esta expuesta falla con "Could not find the table
+-- ... in the schema cache", que se lee como "la tabla no existe" y manda a
+-- buscar al lugar equivocado.
 --
 -- ⚠ Y ESA LISTA SE HA RESETEADO SOLA EN ESTE PROYECTO. Si un dia el sync
 -- empieza a fallar con ese mensaje sin que nadie haya tocado nada, es lo
 -- primero que hay que mirar -- no el DDL.
+--
+-- ⚠ Y NO ES UNA BASE SOLO NUESTRA. Verificado el 2026-09-12: expone TRECE
+-- schemas -- public, b2b_metrics, activity_report, pipeline_forecast,
+-- finance_pl, hr_us_payroll, finance_division, org, business_plan, uploads,
+-- outlook, review y comp. Varias apps distintas comparten este proyecto, asi
+-- que reescribir esa lista de memoria le quita la suya a alguien mas.
 --
 -- ⚠ `synced_at` NO ES OPCIONAL, en las dos. El job la escribe en cada fila y el
 -- sweep borra por `synced_at < <la corrida actual>`. Sin la columna el upsert
