@@ -1412,17 +1412,51 @@ const SYNCS: TableSync[] = [
  */
 type SyncGroup = 'core' | 'comp';
 
-type FreshnessGate = {
-  /** Devuelve una sola fila con `oldest_last_modified_time` en milisegundos. */
-  query: string;
-  /** Horas a partir de las cuales el grupo no se escribe. */
-  maxAgeHours: number;
-  /** Qué se está midiendo, para el mensaje de error. */
-  probe: string;
-};
+/**
+ * ⚠ NO TODAS LAS FUENTES LLEVAN PUERTA, Y LA ASIMETRÍA ES DELIBERADA.
+ *
+ * Si estás leyendo esto porque `core` tiene límite y `comp` no, y parece un
+ * olvido a medio terminar: no lo es, y añadirle uno a `comp` rompería el sync.
+ * Son dos TIPOS de fuente distintos, y la puerta sólo significa algo en uno:
+ *
+ *   core   Salesforce -> BigQuery se sincroniza SOLO, cada noche. Que lleve 30
+ *          horas sin moverse quiere decir que ese proceso automático está roto,
+ *          y copiar datos viejos sobre buenos empeora las cosas. Ahí bloquear
+ *          protege algo real.
+ *
+ *   comp   Compensafe se carga A MANO, subiendo archivos. Que lleve un mes sin
+ *          archivo nuevo no es una avería: es que nadie subió uno. No hay nada
+ *          roto de lo que un bloqueo pueda proteger, y bloquear sólo consigue
+ *          dejar las tablas vacías o desactualizadas sin motivo.
+ *          UN ESPEJO REFLEJA LO QUE HAY ARRIBA, aunque sea viejo.
+ *
+ * Lo que sí se conserva de la puerta es LA SEÑAL, que era lo valioso: `comp`
+ * mide su edad igual y la publica en la respuesta --fecha de la última carga y
+ * días transcurridos-- sin abortar y sin fallar la corrida. Así "Compensafe
+ * lleva 40 días sin archivo nuevo" se ve cuando alguien mira, en vez de ser una
+ * alarma que detiene el trabajo de las otras doce tablas.
+ */
+type FreshnessProbe =
+  | {
+      /** Por encima del límite, el grupo no se escribe. */
+      mode: 'blocks';
+      /** Devuelve una sola fila con `oldest_last_modified_time` en milisegundos. */
+      query: string;
+      /** Horas a partir de las cuales el grupo no se escribe. */
+      maxAgeHours: number;
+      /** Qué se está midiendo, para el mensaje. */
+      probe: string;
+    }
+  | {
+      /** Mide la edad y la publica. Nunca impide escribir. */
+      mode: 'informs';
+      query: string;
+      probe: string;
+    };
 
-const FRESHNESS: Record<SyncGroup, FreshnessGate> = {
+const FRESHNESS: Record<SyncGroup, FreshnessProbe> = {
   core: {
+    mode: 'blocks',
     probe: "salesforce.__TABLES__ (Lead, Opportunity, Task, User)",
     maxAgeHours: 30,
     query: `
@@ -1451,17 +1485,17 @@ const FRESHNESS: Record<SyncGroup, FreshnessGate> = {
      */
     probe: 'comp_marts.payroll_by_loan_stage y payroll_transaction_stage (uploaded_at)',
     /*
-     * 14 días, y ES UN VALOR PROVISIONAL: no se puede derivar de los datos.
+     * SÓLO INFORMA. No hay límite porque no habría nada que un límite
+     * protegiera: la fuente se carga a mano, así que un archivo viejo no es una
+     * avería sino la ausencia de un archivo nuevo. Ver la nota del tipo.
      *
-     * El histórico completo de cargas son DOS -- 2026-08-27 con 28 filas, que
-     * parece una prueba, y 2026-09-02 con 361. Dos puntos no son una cadencia.
-     * El umbral de 30 horas del grupo `core` abortaría todas las corridas desde
-     * hace diez días, así que hacía falta uno propio; catorce días es holgado a
-     * propósito, para no bloquear por algo que todavía no sabemos cada cuánto
-     * pasa. Cuando haya varias cargas seguidas, este número se ajusta al ritmo
-     * observado -- y entonces sí querrá decir algo.
+     * Llegó a tener uno de 14 días y se quitó. Era además un número que no se
+     * podía derivar de nada: el histórico COMPLETO de cargas son dos --
+     * 2026-08-27 con 28 filas, que parece una prueba, y 2026-09-02 con 361. Dos
+     * puntos no son una cadencia, así que el umbral habría bloqueado según una
+     * frecuencia inventada.
      */
-    maxAgeHours: 14 * 24,
+    mode: 'informs',
     query: `
       SELECT MIN(t) AS oldest_last_modified_time FROM (
         SELECT UNIX_MILLIS(MAX(uploaded_at)) AS t
@@ -1507,8 +1541,9 @@ function isAuthorized(req: NextRequest): boolean {
 /**
  * Edad de la carga MÁS VIEJA del grupo, en horas.
  *
- * Lanza si la sonda no devuelve nada, así que una pregunta de frescura sin
- * respuesta aborta el grupo en vez de asumir "seguramente está bien".
+ * Lanza si la sonda no devuelve nada. Qué se hace con eso depende del modo: una
+ * puerta sin respuesta no escribe, una sonda informativa se limita a decir que
+ * no pudo medir. Lo decide `evaluateGates`, no esta función.
  */
 async function getDataAgeHours(
   bq: ReturnType<typeof getBigQueryClient>,
@@ -1530,42 +1565,57 @@ async function getDataAgeHours(
 }
 
 /**
- * Lo que la puerta de un grupo decidió.
+ * Lo que la sonda de un grupo midió, y si dejó escribir.
  *
- * Unión y no un objeto con todo opcional: una puerta cerrada SIEMPRE tiene
- * motivo y una abierta nunca lo tiene, y escrito así el compilador lo sabe. Con
- * `motivo: string | null` había que rellenar un caso imposible con un texto que
- * nadie iba a leer nunca.
+ * Unión y no un objeto con todo opcional: un grupo bloqueado SIEMPRE tiene
+ * motivo y uno que escribe nunca lo tiene, y escrito así el compilador lo sabe.
+ * Con `motivo: string | null` había que rellenar un caso imposible con un texto
+ * que nadie iba a leer nunca.
+ *
+ * `puede_escribir: false` sólo puede salir de una sonda `blocks`. Una `informs`
+ * mide y publica, pase lo que pase -- incluso si la propia sonda falla.
  */
 type GateResult =
   | {
       grupo: SyncGroup;
       sonda: string;
+      /** 'blocks' puede impedir la escritura; 'informs' nunca. */
+      modo: 'blocks' | 'informs';
       puede_escribir: true;
-      edad_horas: number;
-      limite_horas: number;
-      last_modified: string;
+      /** Null sólo cuando la sonda falló y el grupo escribe igual. */
+      edad_horas: number | null;
+      dias_desde_la_carga: number | null;
+      /** Null cuando no hay límite: la sonda sólo informa. */
+      limite_horas: number | null;
+      last_modified: string | null;
       motivo: null;
+      /** Qué pasó con la sonda, cuando no pudo medir pero no bloquea. */
+      aviso?: string;
     }
   | {
       grupo: SyncGroup;
       sonda: string;
+      modo: 'blocks';
       /** Ninguna tabla del grupo se escribe. */
       puede_escribir: false;
       /** Null cuando la sonda misma falló: no hubo edad que medir. */
       edad_horas: number | null;
+      dias_desde_la_carga: number | null;
       limite_horas: number;
       last_modified: string | null;
       motivo: string;
     };
 
 /**
- * Evalúa la puerta de cada grupo ANTES de escribir nada.
+ * Mide la frescura de cada grupo ANTES de escribir nada.
  *
- * Una puerta cerrada salta las tablas de SU grupo y ninguna más. Antes era una
- * sola y global: Compensafe lleva diez días sin archivo nuevo, y con la puerta
- * vieja eso habría abortado también las once tablas de Salesforce, que están al
- * día. Un grupo viejo es una razón para no escribir ESE grupo.
+ * Una puerta cerrada salta las tablas de SU grupo y ninguna más. Era una sola y
+ * global, y con eso Compensafe --que lleva diez días sin archivo nuevo por la
+ * razón más simple, que nadie subió uno-- habría abortado también las once
+ * tablas de Salesforce, que están al día.
+ *
+ * Hoy sólo `core` puede cerrar. `comp` mide y publica. Ver la nota de
+ * FreshnessProbe sobre por qué la asimetría es correcta.
  */
 async function evaluateGates(
   bq: ReturnType<typeof getBigQueryClient>,
@@ -1574,44 +1624,88 @@ async function evaluateGates(
   const out = new Map<SyncGroup, GateResult>();
   for (const group of groups) {
     const gate = FRESHNESS[group];
+    const dias = (h: number) => Number((h / 24).toFixed(1));
     try {
       const { ageHours, lastModified } = await getDataAgeHours(bq, group);
+      const medido = {
+        grupo: group,
+        sonda: gate.probe,
+        edad_horas: Number(ageHours.toFixed(2)),
+        dias_desde_la_carga: dias(ageHours),
+        last_modified: lastModified,
+      };
+
+      if (gate.mode === 'informs') {
+        // Se publica y se escribe. Un dato viejo aquí es una observación sobre
+        // quién sube archivos, no un defecto que haya que contener.
+        console.log(
+          `[sync] grupo ${group}: última carga ${lastModified} (${dias(ageHours)} días). Se copia igual.`,
+        );
+        out.set(group, {
+          ...medido,
+          modo: 'informs',
+          puede_escribir: true,
+          limite_horas: null,
+          motivo: null,
+        });
+        continue;
+      }
+
       const fresco = ageHours <= gate.maxAgeHours;
       if (!fresco) {
         console.warn(
           `[sync] grupo ${group}: datos de ${ageHours.toFixed(1)}h, sobre el límite de ${gate.maxAgeHours}h`,
         );
       }
-      const comun = {
-        grupo: group,
-        sonda: gate.probe,
-        edad_horas: Number(ageHours.toFixed(2)),
-        limite_horas: gate.maxAgeHours,
-        last_modified: lastModified,
-      };
       out.set(
         group,
         fresco
-          ? { ...comun, puede_escribir: true, motivo: null }
+          ? { ...medido, modo: 'blocks', puede_escribir: true, limite_horas: gate.maxAgeHours, motivo: null }
           : {
-              ...comun,
+              ...medido,
+              modo: 'blocks',
               puede_escribir: false,
+              limite_horas: gate.maxAgeHours,
               motivo: `los datos tienen ${ageHours.toFixed(1)}h, sobre el límite de ${gate.maxAgeHours}h. No se escribió nada de este grupo.`,
             },
       );
     } catch (err) {
-      // Una sonda que falla es una pregunta sin respuesta, y sin respuesta no
-      // se escribe: ese grupo queda fuera, el resto de la corrida sigue.
       const message = err instanceof Error ? err.message : String(err);
-      console.error(`[sync] grupo ${group}: la sonda de frescura falló: ${message}`);
+      if (gate.mode === 'informs') {
+        /*
+         * La sonda falló y el grupo escribe igual. No es una contradicción: esta
+         * sonda no decide nada, sólo cuenta desde cuándo no llega un archivo.
+         * Perder esa cuenta no es razón para dejar de copiar -- se dice en
+         * `aviso` y se sigue.
+         */
+        console.warn(`[sync] grupo ${group}: la sonda informativa falló (${message}). Se copia igual.`);
+        out.set(group, {
+          grupo: group,
+          sonda: gate.probe,
+          modo: 'informs',
+          puede_escribir: true,
+          edad_horas: null,
+          dias_desde_la_carga: null,
+          limite_horas: null,
+          last_modified: null,
+          motivo: null,
+          aviso: `no se pudo medir la edad del dato: ${message}`,
+        });
+        continue;
+      }
+      // Una puerta que no puede responder es una pregunta sin respuesta, y sin
+      // respuesta no se escribe: ese grupo queda fuera, la corrida sigue.
+      console.error(`[sync] grupo ${group}: la puerta de frescura falló: ${message}`);
       out.set(group, {
         grupo: group,
         sonda: gate.probe,
+        modo: 'blocks',
         puede_escribir: false,
         edad_horas: null,
+        dias_desde_la_carga: null,
         limite_horas: gate.maxAgeHours,
         last_modified: null,
-        motivo: `la sonda de frescura falló: ${message}`,
+        motivo: `la puerta de frescura falló: ${message}`,
       });
     }
   }
@@ -1765,7 +1859,8 @@ export async function GET(req: NextRequest) {
   const grupos: SyncGroup[] = pedido === null ? todos : [pedido as SyncGroup];
   const aCorrer = SYNCS.filter((s) => grupos.includes(groupOf(s)));
 
-  // --- Puerta de frescura, una por grupo. Nada se escribe antes de esto. ---
+  // --- Frescura, medida por grupo. Nada se escribe antes de esto. ---
+  // Sólo `core` puede impedir la escritura; `comp` mide y deja pasar.
   const puertas = await evaluateGates(bq, grupos);
 
   // One timestamp for the whole run, taken before the first write. Every row
@@ -1887,8 +1982,14 @@ export async function GET(req: NextRequest) {
    * ⚠ UNA PUERTA CERRADA TAMBIÉN FALLA LA CORRIDA, aunque no haya escrito nada
    * mal. No escribir porque el dato está viejo es el comportamiento correcto, y
    * aun así es un estado que alguien tiene que mirar: con un 200 nadie se
-   * entera de que Compensafe lleva un mes sin actualizarse. El código dice que
-   * hay algo que atender; `omitidas` dice exactamente qué y por qué.
+   * entera de que Salesforce lleva dos días sin sincronizarse. El código dice
+   * que hay algo que atender; `omitidas` dice exactamente qué y por qué.
+   *
+   * Hoy sólo `core` puede llenar `omitidas`. Un Compensafe viejo NO falla la
+   * corrida: se copia igual y su edad viaja en `puertas`, para que se vea sin
+   * que nada se detenga. Esa es toda la diferencia entre una fuente automática
+   * que puede averiarse y una manual que simplemente espera a que alguien suba
+   * un archivo.
    */
   const ok =
     fallidas.length === 0 && desajustadas.length === 0 && omitidas.length === 0;
