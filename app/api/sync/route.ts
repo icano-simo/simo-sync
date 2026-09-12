@@ -36,7 +36,8 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
 
 const BATCH_SIZE = 500;
-const MAX_DATA_AGE_HOURS = 30;
+// El límite de frescura ya no es uno solo: vive en FRESHNESS, por grupo. Las 30
+// horas de Salesforce siguen siendo las mismas, ahora en FRESHNESS.core.
 
 /**
  * Both guard lists are SCHEMA-QUALIFIED, and have to be.
@@ -49,6 +50,11 @@ const MAX_DATA_AGE_HOURS = 30;
  */
 function qualified(spec: Pick<TableSyncBase, 'schema' | 'target'>): string {
   return `${spec.schema ?? TARGET_SCHEMA}.${spec.target}`;
+}
+
+/** El grupo de un spec, con `core` por defecto. */
+function groupOf(spec: Pick<TableSyncBase, 'group'>): SyncGroup {
+  return spec.group ?? 'core';
 }
 
 /**
@@ -133,6 +139,19 @@ const SWEEPABLE = new Set([
    */
   'org.loan_officer_resolved',
   /*
+   * Las dos de Compensafe. Espejos de archivos que alguien sube: nada de lo que
+   * hay acá lo escribe una persona DENTRO de esta base, así que una fila que
+   * desaparece arriba es una línea que ya no está en el archivo y no una
+   * decisión que haya que conservar.
+   *
+   * El riesgo propio de una fuente por archivos --que una carga parcial borre
+   * lo que no trae-- lo cubre la guarda de `rows.length > 0`, que salta el
+   * barrido cuando el origen devuelve cero, más la puerta de frescura del grupo
+   * `comp`, que impide escribir con un archivo viejo.
+   */
+  'comp.loan_commission',
+  'comp.hours_logged',
+  /*
    * ⚠ `org.roster_current` NO ESTÁ ACÁ, Y NO ES UN OLVIDO.
    *
    * El sweep borra las filas que no volvieron a aparecer arriba. Para las otras
@@ -175,6 +194,13 @@ type TableSyncBase = {
   schema?: string;
   /** Column list for ON CONFLICT; comma-separated for composite keys. */
   conflict: string;
+  /**
+   * Qué puerta de frescura gobierna esta tabla. Sin esto, `core`.
+   *
+   * No es una etiqueta: decide qué sonda decide si la tabla se escribe, y por
+   * eso una tabla nueva hereda `core` en vez de quedarse sin puerta.
+   */
+  group?: SyncGroup;
 };
 
 /**
@@ -1223,16 +1249,230 @@ const SYNCS: TableSync[] = [
       'ya_no_esta_en_el_roster',
     ].join(', '),
   },
+  {
+    /*
+     * ========================================================================
+     * COMISIÓN POR PRÉSTAMO -- COMPENSAFE
+     * ========================================================================
+     *
+     * Primera tabla del job fuera de Salesforce/Encompass/RRHH: viene de
+     * archivos de Compensafe. Primera del schema `comp`, y primera del grupo de
+     * frescura `comp`.
+     *
+     * GRANO: un préstamo.
+     *
+     * INVARIANTE: COUNT(*) = COUNT(DISTINCT loan_number), ningún nulo.
+     * Comprobado el 2026-09-12 con 361 filas: 361 distintos, 0 nulos. Es lo que
+     * hace que `loan_number` sirva de clave sin colapsar nada y que ninguna
+     * tanda pueda traer dos filas que colisionen.
+     *
+     * PARA QUÉ SE TRAE: para que el P&L pueda decir, por préstamo, cuánto se le
+     * pagó al loan officer. Hoy la app no tiene ese dato y por eso el mini P&L
+     * por loan officer estaba bloqueado.
+     *
+     * CRUZA CON EL P&L POR `loan_number` Y SIN TRANSFORMAR NADA -- ni formatos,
+     * ni nombres. Medido sobre una muestra de 170 de los 361: 160 existen en
+     * `loan_officials` y 160 tienen revenue en `pl_transactions`, 94% por los
+     * dos lados. Los 10 que no cruzan son de sucursales fuera de la división o
+     * anteriores al rango del P&L, y se muestran como lo que son.
+     *
+     * ⚠ NO TRAE `person_code`, Y NO HACE FALTA. La vista expone `lo_emp_no`,
+     * que es un id estable, y el cruce con el P&L es por `loan_number`, que es
+     * exacto. Agrupar por `lo_name` sería volver a emparejar nombres a mano --
+     * exactamente lo que esta fuente vino a evitar. Y no serviría de todos
+     * modos: de los 34 loan officers de esta vista, sólo 15 alcanzan un
+     * `person_code` a través de `hours_logged`.
+     *
+     * `upload_batch_id` y `uploaded_at` NO se sincronizan, igual que en
+     * `hiring_tracking`: describen la carga del archivo al stage, no el
+     * préstamo. Para "de cuándo es este dato" está `synced_at`.
+     */
+    name: 'loan_commission',
+    source: 'comp_marts.fct_loan_commission',
+    target: 'loan_commission',
+    schema: 'comp',
+    conflict: 'loan_number',
+    group: 'comp',
+    // Las 15 listadas, no `*`: con `*` viajarían también las dos de metadatos y
+    // el upsert fallaría contra una tabla que no las tiene.
+    select: [
+      'loan_number',
+      'borrower',
+      'completed_date',
+      'lo_name',
+      'lo_emp_no',
+      'processor_name',
+      'branch_manager_name',
+      'loan_amount',
+      'lo_pay',
+      'processor_pay',
+      'bm_pay',
+      'other_pay',
+      // Viene calculado de arriba. No se recalcula acá: sería una segunda
+      // verdad capaz de discrepar con la vista.
+      'total_pay',
+      'lo_effective_bps',
+      'total_effective_bps',
+    ].join(', '),
+  },
+  {
+    /*
+     * ========================================================================
+     * HORAS REGISTRADAS -- COMPENSAFE
+     * ========================================================================
+     *
+     * Quién registró horas en cada periodo, y cuánto se le pagó por ellas. 448
+     * filas, 39 empleados, de agosto 2025 a agosto 2026.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ LA CLAVE LLEVA `pay_date`, Y SIN ÉL EL LOTE ENTERO SE CAE
+     * ------------------------------------------------------------------------
+     * Medido el 2026-09-12:
+     *
+     *   448 filas
+     *   334 distintas por (person_code, periodo)       -> 114 colisiones
+     *   359 distintas por (emp_no, periodo)            ->  89 colisiones
+     *   448 distintas por (emp_no, periodo, pay_date)  <- y sin nulos
+     *
+     * Los 78 grupos repetidos se separan LOS 78 por `pay_date`; ninguno por
+     * sucursal y ninguno queda idéntico en todo. UN PERIODO DE HORAS PUEDE
+     * PAGARSE EN DOS FECHAS, y eso es el dato, no un duplicado que limpiar.
+     *
+     * Sin `pay_date` en la clave, dos filas de la misma tanda colisionan y
+     * Postgres rechaza el batch ENTERO -- el problema que ya tuvo
+     * `realtor_owner_map`. Ahí hizo falta colapsar con QUALIFY; acá no, porque
+     * la clave completa ya es única y no hay nada que descartar.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ LA CLAVE USA `emp_no`, NO `person_code`
+     * ------------------------------------------------------------------------
+     * 34 filas -- 9 de las 39 personas -- no tienen `person_code`:
+     * `hr_centralizado.person_name_key` no las resuelve. Una clave primaria con
+     * nulos no existe, así que `person_code` viaja como columna y no como
+     * identidad.
+     *
+     * Que falte para 9 personas es un hueco de la FUENTE y se muestra como tal.
+     * Rellenarlo acá emparejando nombres reconstruiría a mano lo que esta
+     * fuente vino a reemplazar.
+     *
+     * ------------------------------------------------------------------------
+     * QUÉ VERIFICAR DESPUÉS DE UNA CORRIDA
+     * ------------------------------------------------------------------------
+     * INVARIANTES, no conteos: sube un archivo y las 448 dejan de ser 448.
+     *
+     *   COUNT(*) = COUNT(DISTINCT emp_no, periodo_from, periodo_to, pay_date),
+     *     y ninguno de los cuatro nulo. Si deja de valer, la clave dejó de
+     *     identificar una fila y el upsert empezará a pisar datos.
+     *   El conteo de Supabase contra el de BigQuery, que `syncTable` compara.
+     */
+    name: 'hours_logged',
+    source: 'comp_marts.hours_logged',
+    target: 'hours_logged',
+    schema: 'comp',
+    conflict: 'emp_no,hours_period_from,hours_period_to,pay_date',
+    group: 'comp',
+    select: [
+      'emp_no',
+      'hours_period_from',
+      'hours_period_to',
+      'pay_date',
+      // Resuelto arriba contra hr_centralizado. NULL para 9 de 39 personas.
+      'person_code',
+      'person_name',
+      // El nombre como venía en el archivo, antes de resolver.
+      'employee_in_file',
+      'branch_code',
+      'paid_amount',
+      'recaptured_amount',
+      'net_amount',
+      'had_recapture',
+      'lines',
+    ].join(', '),
+  },
 ];
 
-// MIN, not MAX: the most stale table gates the run. With MAX, one table
-// syncing on time would mask another sitting three days behind, and the job
-// would write those stale rows over good ones.
-const FRESHNESS_QUERY = `
-  SELECT MIN(last_modified_time) AS oldest_last_modified_time
-  FROM salesforce.__TABLES__
-  WHERE table_id IN ('Lead', 'Opportunity', 'Task', 'User')
-`;
+/**
+ * ============================================================================
+ * LA PUERTA DE FRESCURA, UNA POR GRUPO
+ * ============================================================================
+ *
+ * Era una sola y global, y eso dejó de servir cuando entró una segunda fuente
+ * con su propio ritmo: Compensafe se carga por archivos --dos cargas en toda su
+ * historia, el 27 de agosto y el 2 de septiembre-- mientras Salesforce llega a
+ * diario. Con una puerta única, diez días sin subir un archivo de nómina
+ * abortaban la corrida ENTERA y Salesforce dejaba de sincronizarse por una
+ * fuente que no tiene nada que ver con él.
+ *
+ * Ahora cada grupo trae su sonda y su límite, y una vieja salta SOLO sus
+ * tablas. El resto de la corrida sigue.
+ *
+ * MIN, no MAX, dentro de cada grupo, por lo de siempre: con MAX una tabla al
+ * día taparía a otra tres días atrás y el job escribiría esas filas viejas
+ * sobre buenas.
+ */
+type SyncGroup = 'core' | 'comp';
+
+type FreshnessGate = {
+  /** Devuelve una sola fila con `oldest_last_modified_time` en milisegundos. */
+  query: string;
+  /** Horas a partir de las cuales el grupo no se escribe. */
+  maxAgeHours: number;
+  /** Qué se está midiendo, para el mensaje de error. */
+  probe: string;
+};
+
+const FRESHNESS: Record<SyncGroup, FreshnessGate> = {
+  core: {
+    probe: "salesforce.__TABLES__ (Lead, Opportunity, Task, User)",
+    maxAgeHours: 30,
+    query: `
+      SELECT MIN(last_modified_time) AS oldest_last_modified_time
+      FROM salesforce.__TABLES__
+      WHERE table_id IN ('Lead', 'Opportunity', 'Task', 'User')
+    `,
+  },
+  comp: {
+    /*
+     * ⚠ SOLO LAS DOS TABLAS QUE ESTE JOB LEE, y no todo comp_marts.
+     *
+     * `branch_margin_stage` iba seis días por detrás de las demás el
+     * 2026-09-12, y alimenta `branch_margin`, una vista que este job NO trae.
+     * Un MIN sobre el dataset entero lo gobernaría esa tabla y bloquearía dos
+     * sincronizaciones que están al día por una tercera que no nos importa.
+     *
+     * `payroll_transaction_stage` está porque `hours_logged` sale de
+     * `fct_payroll_transaction`, que sale de ahí: la vista no expone un
+     * `uploaded_at` propio que consultar.
+     *
+     * ⚠ Y ES `uploaded_at` DE LAS TABLAS DE LANDING, NO `__TABLES__`. Esta
+     * fuente no viene de Salesforce sino de archivos que alguien sube, así que
+     * lo que hay que medir es cuándo se subió el último archivo y no cuándo se
+     * tocó la tabla por última vez.
+     */
+    probe: 'comp_marts.payroll_by_loan_stage y payroll_transaction_stage (uploaded_at)',
+    /*
+     * 14 días, y ES UN VALOR PROVISIONAL: no se puede derivar de los datos.
+     *
+     * El histórico completo de cargas son DOS -- 2026-08-27 con 28 filas, que
+     * parece una prueba, y 2026-09-02 con 361. Dos puntos no son una cadencia.
+     * El umbral de 30 horas del grupo `core` abortaría todas las corridas desde
+     * hace diez días, así que hacía falta uno propio; catorce días es holgado a
+     * propósito, para no bloquear por algo que todavía no sabemos cada cuánto
+     * pasa. Cuando haya varias cargas seguidas, este número se ajusta al ritmo
+     * observado -- y entonces sí querrá decir algo.
+     */
+    maxAgeHours: 14 * 24,
+    query: `
+      SELECT MIN(t) AS oldest_last_modified_time FROM (
+        SELECT UNIX_MILLIS(MAX(uploaded_at)) AS t
+        FROM \`comp_marts.payroll_by_loan_stage\`
+        UNION ALL
+        SELECT UNIX_MILLIS(MAX(uploaded_at)) AS t
+        FROM \`comp_marts.payroll_transaction_stage\`
+      )
+    `,
+  },
+};
 
 type TableResult = {
   tabla: string;
@@ -1244,6 +1484,13 @@ type TableResult = {
   error: string | null;
   /** Sólo el pipeline: escribe tres tablas y un conteo solo no lo describe. */
   detalle?: PipelineSyncResult;
+  /**
+   * Por qué no se tocó esta tabla, cuando la puerta de su grupo cerró.
+   *
+   * Presente en vez de ausente: una tabla omitida que no aparece en la
+   * respuesta se lee igual que una que se escribió sin problemas.
+   */
+  omitida_por?: string;
 };
 
 /** Constant-time compare so the secret cannot be recovered byte by byte. */
@@ -1258,27 +1505,117 @@ function isAuthorized(req: NextRequest): boolean {
 }
 
 /**
- * Age of the *most stale* Salesforce -> BigQuery load, in hours.
- * Throws if the probe returns nothing, so an unanswerable freshness question
- * aborts the run rather than defaulting to "probably fine".
+ * Edad de la carga MÁS VIEJA del grupo, en horas.
+ *
+ * Lanza si la sonda no devuelve nada, así que una pregunta de frescura sin
+ * respuesta aborta el grupo en vez de asumir "seguramente está bien".
  */
 async function getDataAgeHours(
   bq: ReturnType<typeof getBigQueryClient>,
+  group: SyncGroup,
 ): Promise<{ ageHours: number; lastModified: string }> {
-  const [rows] = await bq.query({ query: FRESHNESS_QUERY });
+  const gate = FRESHNESS[group];
+  const [rows] = await bq.query({ query: gate.query });
   const raw = rows?.[0]?.oldest_last_modified_time;
   const ms = raw === null || raw === undefined ? NaN : Number(raw);
 
   if (!Number.isFinite(ms)) {
-    throw new Error(
-      'salesforce.__TABLES__ returned no last_modified_time for Lead/Opportunity/Task/User',
-    );
+    throw new Error(`${gate.probe} no devolvió una marca de tiempo utilizable`);
   }
 
   return {
     ageHours: (Date.now() - ms) / 3_600_000,
     lastModified: new Date(ms).toISOString(),
   };
+}
+
+/**
+ * Lo que la puerta de un grupo decidió.
+ *
+ * Unión y no un objeto con todo opcional: una puerta cerrada SIEMPRE tiene
+ * motivo y una abierta nunca lo tiene, y escrito así el compilador lo sabe. Con
+ * `motivo: string | null` había que rellenar un caso imposible con un texto que
+ * nadie iba a leer nunca.
+ */
+type GateResult =
+  | {
+      grupo: SyncGroup;
+      sonda: string;
+      puede_escribir: true;
+      edad_horas: number;
+      limite_horas: number;
+      last_modified: string;
+      motivo: null;
+    }
+  | {
+      grupo: SyncGroup;
+      sonda: string;
+      /** Ninguna tabla del grupo se escribe. */
+      puede_escribir: false;
+      /** Null cuando la sonda misma falló: no hubo edad que medir. */
+      edad_horas: number | null;
+      limite_horas: number;
+      last_modified: string | null;
+      motivo: string;
+    };
+
+/**
+ * Evalúa la puerta de cada grupo ANTES de escribir nada.
+ *
+ * Una puerta cerrada salta las tablas de SU grupo y ninguna más. Antes era una
+ * sola y global: Compensafe lleva diez días sin archivo nuevo, y con la puerta
+ * vieja eso habría abortado también las once tablas de Salesforce, que están al
+ * día. Un grupo viejo es una razón para no escribir ESE grupo.
+ */
+async function evaluateGates(
+  bq: ReturnType<typeof getBigQueryClient>,
+  groups: SyncGroup[],
+): Promise<Map<SyncGroup, GateResult>> {
+  const out = new Map<SyncGroup, GateResult>();
+  for (const group of groups) {
+    const gate = FRESHNESS[group];
+    try {
+      const { ageHours, lastModified } = await getDataAgeHours(bq, group);
+      const fresco = ageHours <= gate.maxAgeHours;
+      if (!fresco) {
+        console.warn(
+          `[sync] grupo ${group}: datos de ${ageHours.toFixed(1)}h, sobre el límite de ${gate.maxAgeHours}h`,
+        );
+      }
+      const comun = {
+        grupo: group,
+        sonda: gate.probe,
+        edad_horas: Number(ageHours.toFixed(2)),
+        limite_horas: gate.maxAgeHours,
+        last_modified: lastModified,
+      };
+      out.set(
+        group,
+        fresco
+          ? { ...comun, puede_escribir: true, motivo: null }
+          : {
+              ...comun,
+              puede_escribir: false,
+              motivo: `los datos tienen ${ageHours.toFixed(1)}h, sobre el límite de ${gate.maxAgeHours}h. No se escribió nada de este grupo.`,
+            },
+      );
+    } catch (err) {
+      // Una sonda que falla es una pregunta sin respuesta, y sin respuesta no
+      // se escribe: ese grupo queda fuera, el resto de la corrida sigue.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[sync] grupo ${group}: la sonda de frescura falló: ${message}`);
+      out.set(group, {
+        grupo: group,
+        sonda: gate.probe,
+        puede_escribir: false,
+        edad_horas: null,
+        limite_horas: gate.maxAgeHours,
+        last_modified: null,
+        motivo: `la sonda de frescura falló: ${message}`,
+      });
+    }
+  }
+  return out;
 }
 
 async function syncTable(
@@ -1398,37 +1735,38 @@ export async function GET(req: NextRequest) {
     return Response.json({ ok: false, error: message }, { status: 500 });
   }
 
-  // --- Freshness gate: nothing is written past this point if it fails. ---
-  let freshness: { ageHours: number; lastModified: string };
-  try {
-    freshness = await getDataAgeHours(bq);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return Response.json(
-      { ok: false, aborted: true, stage: 'freshness_check', error: message },
-      { status: 503 },
-    );
-  }
-
-  if (freshness.ageHours > MAX_DATA_AGE_HOURS) {
-    console.warn(
-      `[sync] aborted: data is ${freshness.ageHours.toFixed(1)}h old`,
-    );
+  /*
+   * Qué grupos corre esta llamada. Sin `?group=`, todos.
+   *
+   * EL CRON NO LO USA y es a propósito: sigue siendo `/api/sync` a las 08:00,
+   * una pasada con los catorce destinos. El aislamiento entre fuentes ya lo dan
+   * las puertas por grupo, así que partir el cron habría cambiado algo que
+   * funciona a cambio de nada.
+   *
+   * Está para reintentar a mano: cuando Compensafe se quede fuera por un
+   * archivo viejo y haya que reintentar sólo eso sin volver a tocar las once
+   * tablas de Salesforce que ya escribieron bien.
+   *
+   * Un valor desconocido es un 400 y no una corrida vacía: una llamada mal
+   * escrita que sincroniza cero tablas y responde 200 es el fallo que no se ve
+   * hasta que alguien nota que los datos llevan semanas quietos.
+   */
+  const pedido = new URL(req.url).searchParams.get('group');
+  const todos: SyncGroup[] = ['core', 'comp'];
+  if (pedido !== null && !todos.includes(pedido as SyncGroup)) {
     return Response.json(
       {
         ok: false,
-        aborted: true,
-        stage: 'freshness_check',
-        error:
-          `BigQuery data is ${freshness.ageHours.toFixed(1)}h old, over the ` +
-          `${MAX_DATA_AGE_HOURS}h limit. Nothing was written.`,
-        last_modified: freshness.lastModified,
-        edad_horas: Number(freshness.ageHours.toFixed(2)),
-        limite_horas: MAX_DATA_AGE_HOURS,
+        error: `grupo desconocido: "${pedido}". Los que hay: ${todos.join(', ')}.`,
       },
-      { status: 503 },
+      { status: 400 },
     );
   }
+  const grupos: SyncGroup[] = pedido === null ? todos : [pedido as SyncGroup];
+  const aCorrer = SYNCS.filter((s) => grupos.includes(groupOf(s)));
+
+  // --- Puerta de frescura, una por grupo. Nada se escribe antes de esto. ---
+  const puertas = await evaluateGates(bq, grupos);
 
   // One timestamp for the whole run, taken before the first write. Every row
   // written this run carries it, and the sweep deletes anything older, so the
@@ -1437,7 +1775,29 @@ export async function GET(req: NextRequest) {
 
   // --- Write. One table failing must not stop the others. ---
   const resultados: TableResult[] = [];
-  for (const spec of SYNCS) {
+  const omitidas: TableResult[] = [];
+  for (const spec of aCorrer) {
+    /*
+     * La puerta del grupo cerró. La tabla se omite y se DICE, con el motivo:
+     * una tabla que no se escribió y no aparece en la respuesta se lee como una
+     * tabla que se escribió bien.
+     */
+    const puerta = puertas.get(groupOf(spec))!;
+    if (!puerta.puede_escribir) {
+      console.warn(`[sync] ${spec.name}: omitida, ${puerta.motivo}`);
+      omitidas.push({
+        tabla: qualified(spec),
+        filas_bigquery: 0,
+        filas_supabase: null,
+        filas_borradas: null,
+        // No es un desajuste: es una tabla que no se tocó a propósito.
+        coincide: true,
+        duracion_ms: 0,
+        error: null,
+        omitida_por: puerta.motivo,
+      });
+      continue;
+    }
     try {
       // Un cliente por schema: `db.schema` se fija al construir y no se puede
       // cambiar por consulta. Vienen cacheados, así que esto no abre conexiones.
@@ -1464,8 +1824,24 @@ export async function GET(req: NextRequest) {
    * aislado que las demás -- que el pipeline se caiga no puede llevarse puestas
    * las seis anteriores, que ya escribieron bien.
    */
+  // El pipeline es del grupo `core`: sale de Salesforce como las otras once.
   const pipelineStarted = Date.now();
-  try {
+  if (!grupos.includes('core')) {
+    console.log('[sync] pipeline: fuera de los grupos pedidos, no se corre');
+  } else if (!puertas.get('core')!.puede_escribir) {
+    const motivo = (puertas.get('core') as Extract<GateResult, { puede_escribir: false }>).motivo;
+    console.warn(`[sync] pipeline: omitido, ${motivo}`);
+    omitidas.push({
+      tabla: `${PIPELINE_SCHEMA}.pipeline_snapshots (+loans, +resolved)`,
+      filas_bigquery: 0,
+      filas_supabase: null,
+      filas_borradas: null,
+      coincide: true,
+      duracion_ms: 0,
+      error: null,
+      omitida_por: motivo,
+    });
+  } else try {
     const detalle = await syncPipelineSnapshot(bq);
     console.log(
       `[sync] pipeline: dia=${detalle.snapshot_date} snapshot=${detalle.snapshot_id} ` +
@@ -1504,21 +1880,33 @@ export async function GET(req: NextRequest) {
   const fallidas = resultados.filter((r) => r.error !== null);
   const desajustadas = resultados.filter((r) => r.error === null && !r.coincide);
 
-  // With the sweep in place the target is a mirror of the source, so a count
-  // mismatch is a real defect rather than expected drift, and fails the run.
-  const ok = fallidas.length === 0 && desajustadas.length === 0;
+  /*
+   * With the sweep in place the target is a mirror of the source, so a count
+   * mismatch is a real defect rather than expected drift, and fails the run.
+   *
+   * ⚠ UNA PUERTA CERRADA TAMBIÉN FALLA LA CORRIDA, aunque no haya escrito nada
+   * mal. No escribir porque el dato está viejo es el comportamiento correcto, y
+   * aun así es un estado que alguien tiene que mirar: con un 200 nadie se
+   * entera de que Compensafe lleva un mes sin actualizarse. El código dice que
+   * hay algo que atender; `omitidas` dice exactamente qué y por qué.
+   */
+  const ok =
+    fallidas.length === 0 && desajustadas.length === 0 && omitidas.length === 0;
 
   return Response.json(
     {
       ok,
       duracion_total_ms: Date.now() - started,
       synced_at: syncedAt,
-      last_modified: freshness.lastModified,
-      edad_horas: Number(freshness.ageHours.toFixed(2)),
+      grupos_pedidos: grupos,
+      // Una entrada por grupo: qué se midió, cuándo fue la última carga y si
+      // dejó escribir. Es lo que explica una corrida sin escrituras.
+      puertas: [...puertas.values()],
       tablas_ok: resultados.length - fallidas.length,
       tablas_fallidas: fallidas.map((r) => r.tabla),
       tablas_con_desajuste: desajustadas.map((r) => r.tabla),
-      resultados,
+      tablas_omitidas: omitidas.map((r) => r.tabla),
+      resultados: [...resultados, ...omitidas],
     },
     { status: ok ? 200 : 500 },
   );
