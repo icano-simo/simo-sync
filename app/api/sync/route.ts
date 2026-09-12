@@ -1736,12 +1736,20 @@ export async function GET(req: NextRequest) {
   }
 
   /*
-   * Qué grupos corre esta llamada. Sin `?group=`, todos -- que es lo que hace
-   * una llamada a mano y lo que hacía el cron antes de que hubiera grupos.
+   * Qué grupos corre esta llamada. Sin `?group=`, todos.
    *
-   * Un valor desconocido es un 400 y no una corrida vacía: un cron mal escrito
-   * que sincroniza cero tablas y responde 200 es exactamente el fallo que no se
-   * ve hasta que alguien nota que los datos llevan semanas quietos.
+   * EL CRON NO LO USA y es a propósito: sigue siendo `/api/sync` a las 08:00,
+   * una pasada con los catorce destinos. El aislamiento entre fuentes ya lo dan
+   * las puertas por grupo, así que partir el cron habría cambiado algo que
+   * funciona a cambio de nada.
+   *
+   * Está para reintentar a mano: cuando Compensafe se quede fuera por un
+   * archivo viejo y haya que reintentar sólo eso sin volver a tocar las once
+   * tablas de Salesforce que ya escribieron bien.
+   *
+   * Un valor desconocido es un 400 y no una corrida vacía: una llamada mal
+   * escrita que sincroniza cero tablas y responde 200 es el fallo que no se ve
+   * hasta que alguien nota que los datos llevan semanas quietos.
    */
   const pedido = new URL(req.url).searchParams.get('group');
   const todos: SyncGroup[] = ['core', 'comp'];
