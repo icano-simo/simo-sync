@@ -583,6 +583,66 @@ const SYNCS: TableSync[] = [
       'branch_code_encompass AS branch_encompass',
       'is_affinity',
       'was_reclassified',
+      /*
+       * ────────────────────────────────────────────────────────────────────
+       * DOCE COLUMNAS PARA LOAN COUNT (homesi-pl), 2026-09-13
+       * ────────────────────────────────────────────────────────────────────
+       * Doce y no trece: `loan_program` ya viajaba con las 41 anteriores. La
+       * tabla pasa de 41 a 53 columnas.
+       * Loan Count deja de contar sobre un archivo que alguien sube y pasa a
+       * contar sobre esta tabla. El archivo se habia quedado atras: agosto de
+       * 2026 tiene 47 cierres aquí y CERO allí.
+       *
+       * ⚠ AÑADIR, NUNCA QUITAR NI RENOMBRAR EN ESTA LISTA. `loan_records_v2` la
+       * lee tambien el portal de actividad comercial; sumar columnas es
+       * aditivo y seguro, tocar las que ya estaban no lo es.
+       *
+       * Lo que estas trece responden y las 41 anteriores no:
+       *   de que tipo es el prestamo   loan_purpose, lead_source
+       *   quien mas trabajo en el      los cinco roles ademas del LO
+       *   que margen dejo              las cinco de puntos
+       *
+       * DELIBERADAMENTE FUERA la cadena de hitos completa -- los ocho ms_*,
+       * uw_decision, uw_submitted_date, uw_suspended_date. Son once columnas de
+       * fechas para medir tiempos de ciclo, y eso es otra pantalla: un conteo
+       * no las usa. Estan en la vista cuando hagan falta.
+       */
+      'loan_purpose',
+      /*
+       * El origen del lead, de Encompass.
+       *
+       * Sustituye a `lead_source_lo` del archivo, y esto se verifico antes de
+       * decidirlo: son el mismo campo con los mismos valores -- Friends and
+       * Family, Self-Generated, Transition, Marketing, In-House, Management
+       * Referral, Internet, y hasta la misma grafia rara "ILG - In - House".
+       * El archivo traia ademas cuatro valores que la fuente no usa (Encompass
+       * Integration 47, B2B Strategy 4, Referral 3, External Referral 3) y 46
+       * vacios: residuos de captura. La fuente es la version limpia.
+       */
+      'lead_source',
+      // Los cinco roles que faltaban. `loan_officer_name` ya viaja arriba como
+      // `loan_officer`; estos cinco no tenian columna y por eso no se podia
+      // saber quien mas toco un prestamo.
+      'loan_processor_name',
+      'underwriter_name',
+      'loan_closer_name',
+      'lo_assistant_1_name',
+      'lo_assistant_2_name',
+      /*
+       * El margen del prestamo en PUNTOS, tal como lo calcula Encompass.
+       *
+       * ⚠ NO CONFUNDIR CON EL MARGEN DEL P&L. Esto es lo que dice el sistema de
+       * originacion sobre el prestamo; el P&L de homesi-pl tiene sus propias
+       * cuentas de margen (Back-end, Front-end, Discount Income) que salen de
+       * la contabilidad y viven en otra tabla. Son dos medidas de cosas
+       * parecidas por caminos distintos, y no tienen por que coincidir: usar
+       * una donde se espera la otra da un numero plausible y equivocado.
+       */
+      'back_end_margin_pts',
+      'origination_points',
+      'concessions_pts',
+      'total_branch_margin_pts',
+      'lender_credit_usd',
     ].join(', '),
   },
   {
