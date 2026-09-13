@@ -585,8 +585,10 @@ const SYNCS: TableSync[] = [
       'was_reclassified',
       /*
        * ────────────────────────────────────────────────────────────────────
-       * TRECE COLUMNAS PARA LOAN COUNT (homesi-pl), 2026-09-13
+       * DOCE COLUMNAS PARA LOAN COUNT (homesi-pl), 2026-09-13
        * ────────────────────────────────────────────────────────────────────
+       * Doce y no trece: `loan_program` ya viajaba con las 41 anteriores. La
+       * tabla pasa de 41 a 53 columnas.
        * Loan Count deja de contar sobre un archivo que alguien sube y pasa a
        * contar sobre esta tabla. El archivo se habia quedado atras: agosto de
        * 2026 tiene 47 cierres aquí y CERO allí.

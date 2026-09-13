@@ -1,5 +1,5 @@
 -- ============================================================================
--- activity_report.loan_records_v2 -- trece columnas para Loan Count
+-- activity_report.loan_records_v2 -- doce columnas para Loan Count
 -- ============================================================================
 --
 -- Referencia para ampliar la tabla; los grants y las politicas de RLS no
@@ -91,7 +91,7 @@ comment on column activity_report.loan_records_v2.total_branch_margin_pts is
 
 -- COMPROBAR DESPUES DE EJECUTAR, y antes de desplegar simo-sync:
 --   select count(*) from information_schema.columns
---    where table_schema='activity_report' and table_name='loan_records_v2';   -- 54
+--    where table_schema='activity_report' and table_name='loan_records_v2';   -- 53 (41 + 12)
 --
 -- Y despues de la primera corrida del sync:
 --   select count(*) filter (where lead_source is not null),
