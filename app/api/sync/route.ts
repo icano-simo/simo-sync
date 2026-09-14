@@ -723,7 +723,18 @@ const SYNCS: TableSync[] = [
        *
        * La vista hace COALESCE(b.is_active, FALSE), así que un `branch_code`
        * que no existe en `dim_branch_status` llega como inactivo y sin nota.
-       * Es lo que pasa con el dato malo '700 - 707' (dos códigos en un campo).
+       *
+       * ⚠ EL EJEMPLO QUE ESTABA ACÁ NO SE SOSTIENE. Decía que eso es lo que
+       * pasa con el dato malo '700 - 707' (dos códigos en un campo, en
+       * `hr_centralizado.dim_employee_co`). Medido el 2026-09-13: NINGUNO de
+       * los 114 `branch_code` de `org.roster_current` lleva guion ni espacio,
+       * así que ese valor no llega acá. O la vista lo normaliza, o esa persona
+       * es una de las dos que no llegan -- `dim_employee_co` trae 45 de
+       * Colombia y acá entran 43, y no se determinó qué las filtra.
+       *
+       * Las dos cosas se arreglan en `hr_centralizado`, no en este job. Quedan
+       * anotadas, con la tercera, en el comentario de `org.roster_current`:
+       * ver docs/sql/2026-09-13-roster-override-comentarios.sql.
        */
       'branch_is_active',
       'branch_note',
