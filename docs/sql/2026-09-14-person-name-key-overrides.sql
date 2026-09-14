@@ -1,0 +1,130 @@
+-- ============================================================================
+-- Dos grafias que el espejo no tiene, y por donde deben entrar
+-- ============================================================================
+--
+-- ⚠ NO APLICADO, Y NO SE PUEDE APLICAR DESDE ESTE REPO. No es falta de
+-- credenciales: `simo-sync-bq-reader` es de SOLO LECTURA y la cadena de auth
+-- --Vercel OIDC -> STS -> impersonacion-- solo existe dentro de Vercel. Esto lo
+-- ejecuta quien tenga escritura en BigQuery, a mano.
+--
+-- Origen: `hr_centralizado.person_name_key`, la VISTA que une siete fuentes de
+-- nombres contra `person_code`. 523 filas sobre 111 personas, medido el
+-- 2026-09-14.
+--
+--
+-- ── QUE FALTA, Y COMO SE MIDIO ──────────────────────────────────────────────
+--
+-- Ejecutando el modulo de P&L por Loan Officer el 2026-09-14, con el espejo YA
+-- poblado, la tabla seguia enseñando a dos personas partidas en dos filas:
+--
+--     "July Castro"             0 cierres,  nomina -248.533   <- julymar.castro
+--     "Julymar Mar Castro"      2 cierres,  SIN nomina        <- sin person_code
+--
+--     "adriana espinoza"        0 cierres,  nomina             <- adriana.espinoza
+--     "Adriana Julieth Szczech" 3 cierres,  SIN nomina         <- sin person_code
+--
+-- El mecanismo, medido con el emparejador real:
+--
+--     "Julymar Mar Castro" -> clave "julymar mar castro"
+--        exact -> 1 candidato: (sin person_code)["julymar mar castro"]
+--
+-- `org.loan_officer_resolved` aporta esa grafia SIN codigo. La via `exact` la
+-- encuentra, da candidato unico, y la busqueda para ahi: `ends` --que resolveria
+-- bien contra "julymar castro" del espejo-- no llega a probarse nunca. La suelta
+-- no se fusiono con `julymar.castro` porque la regla de fusion exige compartir
+-- clave, y "julymar mar castro" no comparte ninguna con "julymar castro" ni con
+-- "july castro".
+--
+-- Meter la grafia en el espejo la hace entrar CON codigo, la suelta pasa a
+-- compartir clave con exactamente una persona, se fusiona, y `exact` resuelve
+-- bien. Ese es todo el arreglo.
+--
+--
+-- ── LAS DOS FILAS ───────────────────────────────────────────────────────────
+--
+--     person_code        name_key                    de donde viene la grafia
+--     ----------------------------------------------------------------------
+--     julymar.castro     julymar mar castro          finance_division.loan_officials
+--     adriana.espinoza   adriana julieth szczech     finance_division.loan_officials
+--
+-- Las claves van YA NORMALIZADAS, igual que el resto de la vista: NFD, sin
+-- diacriticos, minusculas, todo lo que no sea [a-z ] a espacio, colapsado.
+--
+--
+-- ── ⚠ POR DONDE DEBEN ENTRAR: UNA OCTAVA FUENTE, NO DENTRO DE LAS SIETE ─────
+--
+-- `person_name_key` es una VISTA. No hay donde insertar una fila, asi que hay
+-- que decidir por donde entran, y la decision importa mas que las dos filas.
+--
+-- NO colarlas dentro de una de las siete fuentes existentes. Esas siete
+-- describen lo que el origen SABE --display, legal_co, hr_usa, directory,
+-- salesforce, loan_officer, correo-- y una grafia añadida a mano ahi queda
+-- indistinguible de un dato que llego solo. El dia que alguien audite de donde
+-- sale "julymar mar castro", la respuesta seria falsa.
+--
+-- SI una OCTAVA fuente de overrides manuales, sumada al UNION con su propio
+-- valor de `src`. Asi la grafia se lee como lo que es --una correccion humana--
+-- y se puede listar, revisar y retirar sin tocar las otras siete.
+--
+-- Es el mismo criterio que ya aplica `org.roster_override`: la correccion vive
+-- aparte del dato, y se ve que es correccion.
+--
+-- ⚠ ESTE ARCHIVO NO NOMBRA LA TABLA DE OVERRIDES A PROPOSITO. No se ha medido
+-- si existe ya una en `hr_centralizado` ni como se llama, y suponerlo seria
+-- repetir exactamente el error que se corrigio en
+-- 2026-09-13-roster-override-comentarios.sql, donde un borrador nombraba
+-- `hr_centralizado.person_field_override` sin haberlo comprobado. Quien aplique
+-- esto la nombra tras mirar, y escribe aqui cual fue.
+--
+--
+-- ── ⚠ FRANK ENRIQUE RODRIGUEZ QUEDA FUERA, Y NO ES UN OLVIDO ────────────────
+--
+-- Tambien sale sin nomina, y tambien por un problema de grafia, pero NO es el
+-- mismo problema y añadirle una grafia aqui lo empeoraria.
+--
+-- `loan_officials` lo tiene DOS VECES: "Frank Rodriguez" con 7 cierres y "Frank
+-- Enrique Rodriguez" con 1. Sus dos mitades tienen cierres, asi que no es una
+-- persona partida entre nomina y prestamos: es una grafia duplicada EN EL
+-- ORIGEN, y se corrige alli unificando las dos filas. Darle una grafia nueva al
+-- espejo dejaria las dos mitades vivas y ademas resolviendo las dos.
+--
+-- Por eso `findSplitByShape` no lo marca, y es correcto que no lo haga: dos
+-- problemas distintos con aspecto parecido.
+--
+--
+-- ── LA VERIFICACION DE DESPUES ──────────────────────────────────────────────
+--
+-- 1. En BigQuery, que la vista las traiga:
+--
+--      select count(*) as filas,
+--             count(distinct person_code) as personas,
+--             count(distinct src) as fuentes
+--        from hr_centralizado.person_name_key;
+--      -- antes: 523 / 111 / 7     ->     despues: 525 / 111 / 8
+--
+--      select person_code, name_key, src
+--        from hr_centralizado.person_name_key
+--       where name_key in ('julymar mar castro', 'adriana julieth szczech');
+--      -- -> dos filas, con el src de la fuente de overrides
+--
+-- 2. Disparar el sync, o esperar al cron, y comprobar el espejo en Supabase:
+--
+--      select count(*) from org.person_name_key;   -- 523 -> 525
+--
+-- 3. Y lo unico que de verdad prueba que sirvio, en el modulo de P&L por Loan
+--    Officer de homesi-pl:
+--
+--      -- `splitByShape` en la respuesta de /api/lo-pnl?all=1
+--      -- antes: 2  ("Julymar Mar Castro" y "Adriana Julieth Szczech")
+--      -- despues: 0
+--
+--    Y en la pantalla, que "July Castro" y "Julymar Mar Castro" dejen de ser
+--    dos filas. Si `splitByShape` baja a 0 pero las filas siguen separadas, el
+--    arreglo no es el que se creia y hay que volver a medir.
+--
+-- ⚠ LO QUE ESTO NO ARREGLA. Cualquier otro nombre que solo exista en
+-- `loan_officer_resolved` sin `person_code` seguira tapando a su persona real
+-- por la via `exact`. El arreglo de fondo --que una suelta sin codigo no gane a
+-- una persona con codigo-- esta escrito en `matchDescription` de
+-- homesi-pl:lib/lo-payroll-name.ts, con la prueba que tendria que pasar. Esto
+-- desatasca dos casos conocidos; aquello cubre los que no conocemos.
