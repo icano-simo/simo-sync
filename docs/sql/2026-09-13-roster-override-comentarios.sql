@@ -2,15 +2,52 @@
 -- Dos comentarios que describian un mundo que ya no existe
 -- ============================================================================
 --
--- NO CAMBIA DATOS NI ESTRUCTURA. Solo `comment on table`. Se puede correr en
--- caliente y es reversible volviendo a poner el texto anterior, que queda
--- copiado abajo.
+-- Ejecutar como `postgres` en el SQL Editor de Supabase (proyecto simoOS-prod).
+-- Idempotente: `comment on table` reemplaza, no acumula.
 --
--- POR QUE: el comentario de `org.roster_override` dice que toda recarga del
--- roster debe re-aplicar sus seis filas "o revertira los datos a valores que el
--- negocio ya rechazo". Ese miedo hizo abrir una investigacion entera el
--- 2026-09-13 para comprobar si el sync diario estaba deshaciendo seis
--- decisiones humanas cada mañana.
+-- APLICADO el 2026-09-13. Verificado despues, contra la base:
+--
+--   -- los dos textos puestos, sin rastro del mundo de Monday
+--   select c.relname,
+--          obj_description(c.oid) ilike '%has_override%' as menciona_senal,
+--          obj_description(c.oid) ilike '%Monday%'       as queda_monday,
+--          obj_description(c.oid) ilike '%NO BORRAR%'    as tiene_no_borrar
+--     from pg_class c join pg_namespace n on n.oid = c.relnamespace
+--    where n.nspname = 'org'
+--      and c.relname in ('roster_current', 'roster_override');
+--   -- -> las dos mencionan has_override, ninguna dice Monday, y el NO BORRAR
+--   --    esta en roster_override, que es donde tiene que estar
+--
+--   -- y cero filas tocadas, que es lo unico que este archivo promete
+--   select (select count(*) from org.roster_override) as overrides,   -> 6
+--          (select count(*) from org.roster_current)  as roster;      -> 114
+--
+-- ⚠ EL TEXTO DE ABAJO ES EL QUE ESTA EN LA BASE, NO EL BORRADOR.
+--
+-- Lo que se aplico fue una version revisada y mas corta que la que este archivo
+-- llevaba al escribirse: misma sustancia, tres razones numeradas en vez de
+-- prosa, y sin una frase del borrador que nombraba
+-- `hr_centralizado.person_field_override` como la tabla de overrides de
+-- BigQuery -- que era una suposicion, no una medicion, y bien quitada.
+--
+-- Se transcribio de vuelta con `obj_description` para que el archivo diga lo
+-- que la base dice. Un .sql marcado APLICADO cuyo contenido no es el aplicado
+-- es la misma trampa que este commit vino a arreglar: un texto que describe
+-- algo que no se puede observar.
+--
+-- Se conserva como registro de por que aquel comentario decia lo que decia y
+-- que se midio para desmentirlo, NO como algo pendiente.
+--
+-- NO CAMBIA DATOS NI ESTRUCTURA. Solo `comment on table`. Se corrio en caliente
+-- y es reversible volviendo a poner el texto anterior, copiado en cada bloque.
+--
+-- ── POR QUE ─────────────────────────────────────────────────────────────────
+--
+-- El comentario de `org.roster_override` decia que toda recarga del roster debe
+-- re-aplicar sus seis filas "o revertira los datos a valores que el negocio ya
+-- rechazo". Ese miedo hizo abrir una investigacion entera el 2026-09-13 para
+-- comprobar si el sync diario estaba deshaciendo seis decisiones humanas cada
+-- mañana.
 --
 -- NO LO ESTA, y no puede estarlo. Lo que se midio:
 --
@@ -44,56 +81,48 @@ begin;
 --    negocio ya rechazo.'
 
 comment on table org.roster_override is
-    'Correcciones confirmadas a mano sobre org.dim_employee, de la epoca en que el roster se subia desde Monday. Seis filas, confirmadas por Isabella Cano el 2026-08-13 y el 2026-08-14.
+    'Correcciones confirmadas sobre el roster. Corrigen org.dim_employee, NO org.roster_current: su clave es employee_key y la de roster_current es person_code. Las dos tablas ni comparten clave.
 
-⚠ NO TIENE NADA QUE VER CON LA RECARGA DE org.roster_current, y su comentario anterior decia lo contrario: pedia re-aplicar estas filas en cada recarga del roster o "revertira los datos a valores que el negocio ya rechazo". Ese aviso costo una investigacion entera el 2026-09-13 y describe un peligro que ya no existe.
+El texto anterior decia "toda recarga del roster debe re-aplicar estas filas o revertira los datos a valores que el negocio ya rechazo". Eso era cierto cuando el roster se subia a mano; hoy no puede ocurrir, por tres razones medidas el 2026-09-13:
+  1. simo-sync NO escribe en dim_employee. El spec lo dice en mayusculas y el dato lo confirma: synced_from_bigquery_at esta en NULL en las 127 filas.
+  2. org.roster_override tiene CERO consumidores de codigo en los cuatro repos. Nada la lee, asi que nada la puede pisar.
+  3. Las seis correcciones se sostienen hoy, comprobadas una por una: los dos nombres en dim_employee.full_name, los dos branch en employee_branch (710 y 711) y ademas ya corregidos en el origen, y los dos is_branch_manager en dim_employee.
 
-LA RAZON DE QUE NO APLIQUE: esta tabla se llavea por employee_key, que es de org.dim_employee. El sync diario escribe org.roster_current, que se llavea por person_code. No comparten clave, y el sync no toca dim_employee -- synced_from_bigquery_at esta en NULL en las 127 filas. Son dos mecanismos de correccion para dos tablas distintas.
+NO CONFUNDIR con roster_current.has_override, que es otro mecanismo, en BigQuery, sobre otra tabla y para otras 11 personas. Solape medido: cero.
 
-MEDIDO el 2026-09-13: las seis correcciones se sostienen. Cuatro en dim_employee y employee_branch (Ana Peña, Julymar Castro, el branch 711 y el BM de Ana Manjarres, el no-BM de Nelson Calderon) y dos que ya subieron al origen, asi que BigQuery las trae corregidas (Luis Silva en 710, Ana Manjarres en 711).
-
-LA QUE SIGUE ABIERTA, y es un problema distinto del que este comentario temia: las dos correcciones de NOMBRE no subieron al origen. roster_current trae "Ana Zegarra" y "July Castro", los dos valores que el negocio rechazo, y la pantalla de Admin los pinta porque lee display_name de ahi. No es una reversion: es una correccion que nunca llego a la tabla que la pantalla lee. Se arregla en hr_centralizado, no re-aplicando nada aqui.
-
-⚠ NO BORRAR esta tabla aunque no la lea nadie. Es el registro de seis decisiones de negocio con su motivo, quien las confirmo y cuando.';
+NO BORRAR aunque ningun codigo la lea. Es el registro de seis decisiones de negocio con su motivo, quien las confirmo y cuando. Un barrido de tablas sin consumidor la marcaria para borrar y estaria equivocado.';
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 2. org.roster_current
 -- ─────────────────────────────────────────────────────────────────────────────
 --
--- Se conserva entero lo que decia --sigue siendo cierto, incluido el aviso de
--- no confundirla con dim_employee-- y se le añade de donde vienen los
--- overrides, que es lo que faltaba para no tener que investigarlo.
+-- Texto anterior: el primer parrafo de abajo, palabra por palabra. Se conservo
+-- entero --sigue siendo cierto, incluido el aviso de no confundirla con
+-- dim_employee-- y se le añadieron los overrides y los pendientes del origen.
 
 comment on table org.roster_current is
     'Roster vigente desde BigQuery (hr_centralizado.roster_for_admin), para la pantalla de Admin. NO reemplaza a org.dim_employee: esa es la identidad que la app usa para navegar, con employee_key referenciado por 378 alias, rutas y una FK con cascada. Esta es de LECTURA y responde otra pregunta: quien esta hoy en el roster de RRHH, en que branch y desde cuando. La app no escribe aca.
 
-LOS OVERRIDES VIENEN YA APLICADOS DESDE BIGQUERY. La vista roster_for_admin los resuelve aguas arriba y entrega la fila ya corregida; has_override es la señal de que esta fila lleva uno. No hay nada que re-aplicar despues del upsert, y escribir codigo que lo intente seria corregir dos veces. (La tabla de overrides en BigQuery es probablemente hr_centralizado.person_field_override, que es la que el comentario de producer_set_by_hand nombra para is_producer; no se verifico contra BigQuery al escribir esto.)
+LOS OVERRIDES LLEGAN YA APLICADOS desde BigQuery. La columna has_override lo señala: 11 de las 114 filas la traen a true el 2026-09-13 — Andres Robles, Aimmee Buendia Hinojosa, Isabel Wagner, Shon Lamberty, Jose Lopez Boggio, Ludwig Aguillon, Igleth Patricia Mercado Ceballos, Rene Perez, Isa Vasquez, Mark Therianos y Claudia Velasco. No hay nada que reaplicar en esta base.
 
-MEDIDO el 2026-09-13: 11 de 114 filas con has_override = true. Aimmee Buendia Hinojosa, Andres Robles, Claudia Velasco, Igleth Patricia Mercado Ceballos, Isa Vasquez, Isabel Wagner, Jose Lopez Boggio, Ludwig Aguillon, Mark Therianos, Rene Perez y Shon Lamberty. De esas 11, cuatro traen ademas active_set_by_hand: Isabel Wagner, Ludwig Aguillon, Mark Therianos y Rene Perez.
+NO CONFUNDIR con org.roster_override, que son otras seis correcciones, sobre org.dim_employee, con otra clave. Solape medido: cero.
 
-⚠ ESOS 11 NO SON LOS 6 DE org.roster_override. El solape es CERO, y son dos sistemas independientes que no se conocen: este vive en BigQuery y corrige roster_current; aquel vive aqui, se llavea por employee_key y corrige dim_employee. Confundirlos ya costo una investigacion.
-
-PENDIENTE EN EL ORIGEN, no en esta app -- las tres se arreglan en hr_centralizado:
-  1. dim_employee_co tiene 45 personas de Colombia y aqui llegan 43 (country = CO). Faltan dos y no se ha determinado que las filtra.
-  2. Una persona tiene branch_code = "700 - 707" en dim_employee_co, dos codigos en un campo. No aparece asi en esta tabla: ningun branch_code de las 114 lleva guion ni espacio. O se normaliza en la vista, o esa persona es una de las dos que no llegan.
-  3. Los nombres normalizados de Ana Peña y Julymar Castro, que aqui siguen llegando como "Ana Zegarra" y "July Castro" -- ver el comentario de org.roster_override.';
+PENDIENTE EN EL ORIGEN, no en esta app:
+  - hr_centralizado.dim_employee_co tiene 45 personas de Colombia y aqui llegan 43. Faltan dos y no se sabe que las filtra.
+  - Una persona tiene branch_code "700 - 707" en el origen, dos sucursales en un campo. No llega asi aqui: los 114 branch_code estan limpios.
+  - Dos nombres corregidos en org.roster_override (Ana Pena y Julymar Castro) NO subieron al origen, asi que esta tabla sigue mostrando "Ana Zegarra" y "July Castro", los valores que el negocio rechazo el 2026-08-13. La pantalla de Admin los pinta y su has_override sale en false.';
 
 commit;
 
 -- ============================================================================
--- COMPROBACION despues de aplicar
+-- LA COMPROBACION QUE HAY QUE REPETIR, no la de aplicar
 -- ============================================================================
 --
--- Que los dos comentarios quedaron puestos:
---
---   select c.relname,
---          left(obj_description(c.oid), 80) as inicio
---   from pg_class c
---   join pg_namespace n on n.oid = c.relnamespace
---   where n.nspname = 'org'
---     and c.relname in ('roster_current', 'roster_override');
---
--- Y que lo que afirman sigue siendo verdad (11 y 6, sin solape):
+-- La de aplicar esta arriba y ya se corrio. Esta es otra cosa: los comentarios
+-- que acaban de ponerse AFIRMAN UN NUMERO --11 overrides de BigQuery, 6
+-- manuales, cero solape-- y un comentario que afirma un numero envejece. Si el
+-- solape deja de ser 0, los dos mecanismos empezaron a pisarse y lo que estas
+-- tablas dicen de si mismas dejo de ser verdad.
 --
 --   select (select count(*) from org.roster_current where has_override) as bq_override,
 --          (select count(*) from org.roster_override)                   as manual_override,
@@ -103,5 +132,8 @@ commit;
 --             join org.roster_current r on r.person_code = e.person_code
 --            where r.has_override)                                      as solape;
 --
--- Esperado: 11, 6, 0. Si el solape deja de ser 0, los dos mecanismos empezaron
--- a pisarse y hay que mirarlo antes de seguir.
+-- Esperado: 11, 6, 0 -- medido asi el 2026-09-13. Los dos primeros pueden
+-- moverse sin que nada este mal: RRHH corrige a mas gente, o alguien añade un
+-- override manual. El TERCERO no: un solape distinto de cero significa que una
+-- misma persona la estan corrigiendo los dos sistemas a la vez, y entonces hay
+-- que decidir cual manda antes de tocar nada.
