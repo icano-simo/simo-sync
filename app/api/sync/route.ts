@@ -768,6 +768,59 @@ const SYNCS: TableSync[] = [
   {
     /*
      * ========================================================================
+     * LAS GRAFIAS DE CADA PERSONA
+     * ========================================================================
+     *
+     * Todas las maneras de escribir el nombre de alguien, contra su
+     * `person_code`. La vista une SIETE fuentes: display, legal_co, hr_usa,
+     * directory, salesforce, loan_officer y el implícito del correo.
+     *
+     * GRANO: una grafía por fuente, no una persona. Por eso la clave de
+     * conflicto son las TRES columnas: la misma grafía puede llegar por dos
+     * fuentes --"Ana Peña" está en display y en directory-- y son dos hechos
+     * distintos sobre la misma persona.
+     *
+     * INVARIANTE: ningún `person_code` ni `name_key` nulo. La vista ya descarta
+     * los nombres vacíos, así que un nulo aquí sería un cambio de la vista.
+     * Medido el 2026-09-14: 523 filas, 111 personas, 7 fuentes. Dos tandas.
+     *
+     * PARA QUE: el módulo de P&L por Loan Officer de homesi-pl cruza la nómina
+     * del P&L --texto libre, "LAINO CHEGWIN, GIAN L"-- con las personas. Esta
+     * tabla aporta lo que ninguna normalización de texto puede deducir: que
+     * "steve badovinac" y "steven badovinac" son la misma persona.
+     *
+     * ⚠ NO ES UN SUPERCONJUNTO DE `roster_current`, y confundirlo cuesta caro.
+     * `dim_person`, su base, tiene 111 personas; `roster_current` 114 y
+     * `dim_employee` 127. Son poblaciones distintas: 18 de los 46 loan officers
+     * de finance_division.loan_officials NO ESTÁN en dim_person. Medido, sobre
+     * esos 46: esta tabla sola resuelve 28, la normalización de texto sola 31,
+     * y unidas 34. Quien retire las otras fuentes creyendo que ésta las
+     * reemplaza pierde 18 personas, y el síntoma --"sin nómina localizada"-- se
+     * lee como un hallazgo del negocio y no como una regresión del código.
+     *
+     * ⚠ SIN `group`, o sea `core`, IGUAL QUE EL ROSTER. Deliberado: viene del
+     * mismo `hr_centralizado` y se consume junto al roster, así que las dos
+     * tienen que envejecer a la vez. Darle puerta propia permitiría que una
+     * estuviera fresca y la otra no, y entonces habría gente en el roster cuyas
+     * grafías todavía no han llegado.
+     *
+     * ⚠ `name_key` YA VIENE NORMALIZADA de la vista --NFD, sin diacríticos,
+     * minúsculas, todo lo que no sea [a-z ] a espacio, colapsado-- y NO se
+     * vuelve a tocar aquí. `lib/lo-payroll-name.ts` de homesi-pl replica esa
+     * misma normalización para poder comparar. Si la vista cambia la suya, hay
+     * que cambiar la de allí: dos normalizaciones distintas dan dos claves que
+     * no casan nunca, y eso no falla -- devuelve "no localizado" para todos.
+     */
+    name: 'person_name_key',
+    source: 'hr_centralizado.person_name_key',
+    target: 'person_name_key',
+    schema: 'org',
+    conflict: 'person_code,name_key,src',
+    select: ['person_code', 'name_key', 'src'].join(', '),
+  },
+  {
+    /*
+     * ========================================================================
      * RECLUTAMIENTO DE LOAN OFFICERS
      * ========================================================================
      *
