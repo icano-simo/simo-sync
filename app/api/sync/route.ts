@@ -578,6 +578,26 @@ const SYNCS: TableSync[] = [
       'nppm_recruited_by',
       'opportunity_owner',
       'owner_title',
+      /*
+       * Si el dueño de la oportunidad es un Business Developer.
+       *
+       * La columna "BD owner" de Loan Count sacaba `bd` --el BD asignado AL
+       * REALTOR, cruzado por la clave del realtor-- y de la mayoria de los 183
+       * prestamos que mostraba era falso. El prestamo 770002068892 enseñaba
+       * "Andres Zorro", que no lo trajo: lleva a su realtor.
+       *
+       * Con esto la columna muestra `opportunity_owner` solo cuando es true.
+       * Pasa de 183 valores a 126, y los 126 si son del prestamo: los 282
+       * restantes son "sf integrations", que no es una persona.
+       *
+       * ⚠ VIAJA AUNQUE HOY SEA DERIVABLE de owner_title = 'Business Developer'
+       * --coinciden exacto, 126 cierres y las mismas siete personas--. Comparar
+       * el titulo en la app seria inferir esta logica desde una foto: el dia
+       * que el origen contemple un titulo nuevo o un roster de BD activos, la
+       * comparacion de cadena se quedaria atras SIN FALLAR, y la unica señal
+       * seria un BD que desaparece de una pantalla.
+       */
+      'owner_es_bd',
       'sf_stage',
       'branch_source',
       'branch_code_encompass AS branch_encompass',
