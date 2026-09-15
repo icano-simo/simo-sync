@@ -1,0 +1,80 @@
+-- ============================================================================
+-- loan_records_v2.owner_es_bd: si el dueño de la oportunidad es un BD
+-- ============================================================================
+--
+-- APLICADO el 2026-09-15 sobre simoOS-prod. Aditiva y nullable, asi que no
+-- toca ninguna fila existente: el sync la rellena en su proxima corrida y hasta
+-- entonces vale null.
+--
+--   alter table activity_report.loan_records_v2
+--     add column if not exists owner_es_bd boolean;
+--
+-- Verificacion despues:
+--
+--   select count(*) filter (where owner_es_bd) as son_bd,
+--          count(*) filter (where owner_es_bd is false) as no_son_bd,
+--          count(*) filter (where owner_es_bd is null) as sin_sincronizar
+--     from activity_report.loan_records_v2
+--    where is_closed and counts_for_division;
+--   -- antes del sync:  0 / 0 / 494
+--   -- despues:       126 / 368 / 0
+--
+--
+-- ── PARA QUE, y que estaba mal ──────────────────────────────────────────────
+--
+-- La columna "BD owner" de Loan Count sacaba `bd` --`realtor_bd` en BigQuery,
+-- de app_b2b_metrics.realtor_owner, campo calc_Realtor_BD_Name--. Ese es el BD
+-- asignado AL REALTOR y se cruza por la clave del realtor, no por el prestamo.
+--
+-- El caso que lo destapo, prestamo 770002068892:
+--
+--     realtor_bd          Andres Zorro       <- lo que la columna mostraba
+--     realtor_name        Azucena Coronado Bardales
+--     opportunity_owner   sf integrations
+--     owner_title         Salesforce Developer
+--     strategy            Own Production
+--
+-- Andres Zorro no trajo ese prestamo: lleva a esa realtor. La columna decia
+-- "este prestamo es de este BD" de 183 prestamos, y de la mayoria era falso.
+--
+-- Lo que debe mostrar es `opportunity_owner`, PERO SOLO cuando esa persona es
+-- un Business Developer. Medido sobre los 494 cierres:
+--
+--     owner_title              cierres   personas
+--     ------------------------------------------
+--     Salesforce Developer        282        1     <- "sf integrations"
+--     Business Developer          126        7
+--     Account Executive            34        2
+--     LOA                          19        6
+--     Sales Agent                  16        5
+--     (null)                        9        1
+--     Branch Manager                4        2
+--     Cto                           2        1
+--     Loan Officer                  2        1
+--
+-- La columna pasa de 183 valores a 126, pero los 126 SON del prestamo. Los 282
+-- de "sf integrations" no son una persona: son la integracion.
+--
+--
+-- ── ⚠ POR QUE UNA COLUMNA Y NO `owner_title = 'Business Developer'` ─────────
+--
+-- Porque hoy coinciden EXACTO --126 cierres, las mismas siete personas: Josue
+-- Toro 47, Javier Peñaloza 19, Giovanni Osorio 16, Angie Cassiani 14, Annie
+-- Garrido 14, Belkys Armesto 10, Shirlis Naranjo 6-- y aun asi comparar el
+-- titulo en la app seria INFERIR LA LOGICA DE BIGQUERY DESDE UNA FOTO.
+--
+-- `owner_es_bd` ya esta calculada en el origen. Si algun dia contempla un
+-- titulo nuevo --"Sr. Business Developer", un BD que dejo de serlo, un roster
+-- de BD activos-- la comparacion de cadena se quedaria atras sin fallar: la
+-- columna diria una cosa y la app otra, y la unica señal seria un BD que
+-- desaparece de una pantalla.
+--
+-- Es el mismo patron que este repo lleva tiempo desmontando: un atajo escrito
+-- al lado de la logica buena, que no sabe lo que ella sabe.
+--
+--
+-- ── Y `bd` SE QUEDA, CON SU NOMBRE ──────────────────────────────────────────
+--
+-- No se retira: responde otra pregunta legitima --"que BD lleva al realtor de
+-- este prestamo"-- que el modulo B2B y las alertas pueden necesitar. Lo que no
+-- puede es llamarse "BD owner", porque no lo es.
