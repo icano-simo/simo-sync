@@ -1583,23 +1583,66 @@ const SYNCS: TableSync[] = [
      * fuente vino a reemplazar.
      *
      * ------------------------------------------------------------------------
+     * ⚠ LA CLAVE COMPUESTA SE CAYÓ, Y POR QUÉ AHORA ES SINTÉTICA
+     * ------------------------------------------------------------------------
+     * Todo lo de arriba sigue siendo cierto sobre qué distingue una fila -- pero
+     * la clave NO puede ser esa combinación, y el 2026-09-16 la corrida lo
+     * mostró:
+     *
+     *   hours_logged failed: null value in column "hours_period_from" of
+     *   relation "hours_logged" violates not-null constraint
+     *
+     * `hours_period_from` PUEDE FALTAR: 4 filas de 731 traen una descripción que
+     * no sigue el patrón "Hours entered from M.D.YY to M.D.YY", así que no hay
+     * de dónde sacar las fechas. Una columna que puede ser NULL no puede ser
+     * clave primaria, y por esas cuatro filas se caía la carga ENTERA.
+     *
+     * La fuente pasa a `comp_marts.hours_logged_v`, que agrega `hours_key`: una
+     * clave sintética, calculada ARRIBA. Las dos fechas quedan nullables en el
+     * destino y viajan como columnas.
+     *
+     * ⚠ SE CALCULA EN LA VISTA Y NO EN EL JOB, a propósito. Una clave calculada
+     * acá existiría sólo en Supabase --no se podría joinear desde BigQuery ni
+     * comprobar un invariante sobre ella-- y, lo que decide: podría DIVERGIR DE
+     * SÍ MISMA. Si alguien cambiara cómo se compone, las filas viejas quedarían
+     * con la clave vieja, el upsert dejaría de encontrarlas e insertaría
+     * duplicados en vez de actualizar. Con la clave en la vista, un cambio así
+     * se ve como un barrido y el conteo cuadra.
+     *
+     * ⚠ Y LO QUE HACE QUE FUNCIONE PARA LAS CUATRO ES UN `COALESCE` A CADENA
+     * VACÍA. Sin él, concatenar un NULL daría NULL en toda la expresión --o sea
+     * que la clave sería nula justo en las filas que causaron el problema-- y el
+     * arreglo no arreglaría nada.
+     *
+     * ------------------------------------------------------------------------
      * QUÉ VERIFICAR DESPUÉS DE UNA CORRIDA
      * ------------------------------------------------------------------------
-     * INVARIANTES, no conteos: sube un archivo y las 448 dejan de ser 448.
+     * INVARIANTES, no conteos: sube un archivo y las 731 dejan de ser 731.
      *
-     *   COUNT(*) = COUNT(DISTINCT emp_no, periodo_from, periodo_to, pay_date),
-     *     y ninguno de los cuatro nulo. Si deja de valer, la clave dejó de
-     *     identificar una fila y el upsert empezará a pisar datos.
+     *   COUNT(*) = COUNT(DISTINCT hours_key), sin nulos ni cadenas vacías. Es
+     *     lo único que hace de clave; si deja de valer, el upsert empieza a
+     *     pisar datos.
+     *   `emp_no` y `pay_date` sin nulos. Son los dos componentes que SIEMPRE
+     *     están, y de los que la clave depende para distinguir filas.
+     *   Que `hours_period_from` y `hours_period_to` falten NO es un defecto: es
+     *     una descripción que no sigue el patrón. Verificarlas como obligatorias
+     *     es lo que rompió la carga.
      *   El conteo de Supabase contra el de BigQuery, que `syncTable` compara.
+     *
+     * Al 2026-09-16: 731 filas, 731 claves distintas, ninguna nula ni vacía, 4
+     * sin periodo.
      */
     name: 'hours_logged',
-    source: 'comp_marts.hours_logged',
+    source: 'comp_marts.hours_logged_v',
     target: 'hours_logged',
     schema: 'comp',
-    conflict: 'emp_no,hours_period_from,hours_period_to,pay_date',
+    conflict: 'hours_key',
     group: 'comp',
     select: [
+      // La clave, calculada en la vista. Ver la nota de arriba.
+      'hours_key',
       'emp_no',
+      // Pueden faltar --4 de 731-- y por eso ya no son parte de la clave.
       'hours_period_from',
       'hours_period_to',
       'pay_date',
