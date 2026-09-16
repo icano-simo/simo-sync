@@ -145,18 +145,25 @@ const SWEEPABLE = new Set([
    */
   'org.loan_officer_resolved',
   /*
-   * Las dos de Compensafe. Espejos de archivos que alguien sube: nada de lo que
-   * hay acá lo escribe una persona DENTRO de esta base, así que una fila que
-   * desaparece arriba es una línea que ya no está en el archivo y no una
+   * Las tres de Compensafe. Espejos de archivos que alguien sube: nada de lo
+   * que hay acá lo escribe una persona DENTRO de esta base, así que una fila
+   * que desaparece arriba es una línea que ya no está en el archivo y no una
    * decisión que haya que conservar.
    *
    * El riesgo propio de una fuente por archivos --que una carga parcial borre
    * lo que no trae-- lo cubre la guarda de `rows.length > 0`, que salta el
    * barrido cuando el origen devuelve cero, más la puerta de frescura del grupo
    * `comp`, que impide escribir con un archivo viejo.
+   *
+   * ⚠ `payroll_transaction` ES LA QUE MÁS NECESITA EL BARRIDO, y por una razón
+   * que las otras dos no tienen: su clave incluye `amount` y la descripción.
+   * Corregir un importe arriba no actualiza la fila -- crea una nueva, porque
+   * la clave cambió. Sin barrido quedarían las dos, el pago viejo y el
+   * corregido, sumando los dos en la misma persona.
    */
   'comp.loan_commission',
   'comp.hours_logged',
+  'comp.payroll_transaction',
   /*
    * Espejo de los realtors del programa NPPM. Una fila que desaparece arriba es
    * alguien que salió del programa, y esta tabla no guarda nada propio: sus
@@ -1684,6 +1691,238 @@ const SYNCS: TableSync[] = [
   {
     /*
      * ========================================================================
+     * NÓMINA LÍNEA A LÍNEA -- COMPENSAFE
+     * ========================================================================
+     *
+     * Tercera de Compensafe, y la que abre el total que las otras dos dejan
+     * cerrado. GRANO: UNA LÍNEA de nómina. 1.859 al 2026-09-16.
+     *
+     * PARA QUÉ SE TRAE: en el P&L por Loan Officer, "Loan officer payroll" es
+     * hoy una sola cifra --la suma de las cuentas 60105, 60115 y 60117-- que
+     * contesta cuánto se le pagó a alguien y no contesta por qué. Compensafe sí
+     * lo sabe:
+     *
+     *     Commission            549 líneas     1.288.545
+     *     Other                 760 líneas     1.241.645
+     *     Bonus                 264 líneas       574.391
+     *     Earnings Recapture    252 líneas      -203.614
+     *     Override               34 líneas        39.412
+     *
+     * Las horas solas son 1,24 millones, casi tanto como las comisiones.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ LA FUENTE ES UNA VISTA QUE TODAVÍA NO EXISTE, Y ESO BLOQUEA ESTE SPEC
+     * ------------------------------------------------------------------------
+     * `comp_marts.fct_payroll_transaction` NO TRAE NINGUNA COLUMNA QUE SIRVA DE
+     * CLAVE -- ni transaction_id ni número de línea. Hace falta una sintética, y
+     * por el precedente de `hours_logged` SE CALCULA ARRIBA, en una vista
+     * `fct_payroll_transaction_v`, no acá.
+     *
+     * La razón está escrita en el spec de al lado y vale igual: una clave
+     * calculada en el job existiría sólo en Supabase --no se podría joinear
+     * desde BigQuery ni comprobar un invariante sobre ella-- y podría DIVERGIR
+     * DE SÍ MISMA. Si alguien cambiara cómo se compone, las filas viejas
+     * quedarían con la clave vieja, el upsert dejaría de encontrarlas e
+     * insertaría duplicados en vez de actualizar.
+     *
+     * La vista tiene que exponer `txn_key` así, y medido: 1.859 valores
+     * distintos sobre 1.859 filas.
+     *
+     *   CONCAT(
+     *     emp_no, '|', CAST(pay_date AS STRING), '|', pay_type, '|',
+     *     COALESCE(loan_number, ''), '|', COALESCE(description, ''), '|',
+     *     CAST(amount AS STRING)
+     *   ) AS txn_key
+     *
+     * ⚠ EL `COALESCE` NO ES DEFENSIVO, ES LO QUE HACE QUE FUNCIONE. Es la misma
+     * lección de `hours_logged_v`, y acá pega mucho más fuerte: allá fallaban 4
+     * filas de 731 por una descripción rara; acá `loan_number` ES NULO EN LA
+     * MAYORÍA DE LAS LÍNEAS -- Bonus, las horas, casi todo lo que no es
+     * comisión. Concatenar un NULL da NULL en toda la expresión, así que sin
+     * COALESCE la clave sería nula en más de la mitad de la tabla.
+     *
+     * ⚠ Y HAY QUE COMPROBAR QUE `description` NO CONTENGA `|`. Es texto libre:
+     * un `|` dentro movería el troceo y dos filas distintas podrían producir la
+     * misma clave. Si aparece, se escapa o se pasa a un hash.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ LA CLAVE NO LLEVA ORDINAL, Y NINGUNA COMBINACIÓN MÁS CORTA VALE
+     * ------------------------------------------------------------------------
+     * Un ROW_NUMBER() la habría hecho única por construcción, pero sólo aguanta
+     * mientras la carga sea completa. Las seis columnas de negocio aguantan las
+     * dos, así que si esto pasa algún día a incremental la clave sigue valiendo.
+     *
+     * Y hacen falta las seis. A este grano nada más corto es único:
+     *
+     *   emp_no + pay_date                    no basta
+     *   + pay_type                           no basta
+     *   + loan_number                        no basta
+     *   + description                        separa los periodos
+     *   + amount                             separa el adelanto del resto
+     *
+     * EL CASO QUE LO DEMUESTRA -- Jorge Zuzunaga, 2025-11-14. Una persona, UNA
+     * FECHA DE PAGO, SEIS LÍNEAS: cuatro periodos de horas de agosto a octubre
+     * recuperados de golpe (-420, -1.005, -1.327,50, -1.320) más un quinto
+     * pagado (1.800) y recuperado en parte (-787,50) el mismo día. Cobra horas
+     * cada quincena y al cerrar un préstamo se las descuentan.
+     *
+     * Lo mismo visto desde `comp.hours_logged`: 77 de sus 738 filas vienen de
+     * DOS líneas de origen con el mismo emp_no, periodo y fecha de pago.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ TRES COLUMNAS QUE LA VISTA TIENE QUE RESOLVER, NO EL JOB
+     * ------------------------------------------------------------------------
+     * 1. `hours_period_from` / `_to` NO EXISTEN en el origen: salen de
+     *    `description` con "Hours entered from M.D.YY to M.D.YY". Tiene que ser
+     *    LA MISMA extracción que usa `hours_logged_v`, no una nueva: dos
+     *    implementaciones darían dos periodos distintos el día que aparezca una
+     *    descripción rara, y las dos tablas dejarían de cuadrar sin que nada
+     *    falle. Y pueden faltar sin que sea un error -- 4 de 731 allá.
+     *
+     * 2. `gl_code_credit` SE ESCRIBE EN `pay_category`, renombrada. El nombre
+     *    del origen promete un código contable y lo que trae son categorías de
+     *    pago: Non-Recoverable Hours 253, Recoverable Hours 251,
+     *    Non-Recoverable Salary 190, Recoverable Salary 1, y nulo en Commission,
+     *    Bonus y Override. NO sirve para cuadrar contra el P&L.
+     *
+     *    ⚠ Y SÓLO CUBRE 2026. Las 311 líneas de horas de 2025 vienen sin
+     *    categoría porque Compensafe empezó a clasificar después. NO SE RELLENA
+     *    EL HUECO: null ahí significa "no consta", y escribir 'Non-Recoverable'
+     *    por defecto convertiría un no-consta en un no.
+     *
+     * 3. `description` VIAJA CON SU NOMBRE, Y ESO ES UNA DECISIÓN. El destino
+     *    se llamó `check_description` durante unas horas y se renombró: ese
+     *    nombre YA significa otra cosa en `finance_division.pl_transactions`
+     *    --el memo de un apunte del libro mayor, que leen las reglas de centro
+     *    de coste, los repartos y la detección del B2B success fee-- y dos
+     *    campos de dos sistemas con el mismo nombre acaban en alguien
+     *    aplicándole a uno una regla escrita para el otro.
+     *
+     *    ⚠ Y se quedó en `description`, el nombre del origen, en vez de un
+     *    tercer nombre propio: el espejo y la fuente hablan el mismo idioma,
+     *    que es lo que hace que este `select` no traduzca nada.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ `unmatched_person` ES `not null`, Y SU NULO NO ES `false`
+     * ------------------------------------------------------------------------
+     * Si el mart no dice si casó o no, eso no es "casó bien". Es la columna que
+     * da entrada a los 523.207,01 de nómina que el módulo no atribuye a nadie;
+     * un `false` por defecto los haría desaparecer del recuento. Si llega nula,
+     * la carga FALLA -- que es lo correcto: un hueco visible, no uno rellenado.
+     *
+     * ------------------------------------------------------------------------
+     * LO QUE NO SE TRAE, Y POR QUÉ
+     * ------------------------------------------------------------------------
+     *   bps              Es amount/loan_amount*10.000 -- medido, 739 de 739 sin
+     *                    una excepción. Derivable de las dos columnas que
+     *                    viajan al lado, y la app ya calcula bps contra
+     *                    `loan_officials`. Dos números guardados contestando lo
+     *                    mismo se separan cuando uno de los denominadores
+     *                    cambie.
+     *   debit_credit     El signo, y `amount` ya lo lleva (Earnings Recapture
+     *                    suma -203.614). ⚠ Si algún día `amount` llegara SIN
+     *                    signo, esta columna tampoco se guarda: se aplica acá
+     *                    antes de escribir, para que nadie pueda leer el
+     *                    importe sin ella.
+     *   borrower         Está en `comp.loan_commission`, por `loan_number`. Un
+     *                    nombre de cliente en dos sitios son dos grafías.
+     *   loan_branch_name El nombre del código que ya viaja. El catálogo es
+     *                    `finance_division.branches`.
+     *   property_state   Es un hecho del inmueble, no del pago.
+     *   person_country   Ninguna pregunta de este módulo depende de él.
+     *
+     * ------------------------------------------------------------------------
+     * QUÉ VERIFICAR DESPUÉS DE UNA CORRIDA
+     * ------------------------------------------------------------------------
+     * INVARIANTES, no conteos: sube un archivo y las 1.859 dejan de ser 1.859.
+     *
+     *   COUNT(*) = COUNT(DISTINCT txn_key), sin nulos ni cadenas vacías. Si
+     *     deja de valer, o apareció un `|` en una descripción o el COALESCE se
+     *     cayó -- y el upsert empieza a pisar filas.
+     *   `emp_no`, `pay_date`, `pay_type` y `amount` sin nulos.
+     *   Que `hours_period_from` y `_to` falten NO es un defecto. Verificarlas
+     *     como obligatorias es lo que rompió la carga de `hours_logged`.
+     *   Que `pay_category` falte en 2025 TAMPOCO. Son 311 líneas y es la fuente
+     *     la que no clasificaba entonces.
+     *   Earnings Recapture tiene que sumar NEGATIVO.
+     *
+     * ⚠ Y UNA QUE NO ES UN INVARIANTE SINO UNA PREGUNTA ABIERTA, A CERRAR ANTES
+     * DE QUE NINGUNA PANTALLA LEA LAS DOS TABLAS: `comp.hours_logged` tiene 738
+     * filas construidas sobre 815 líneas de origen, e `is_hourly` marca acá 815
+     * líneas. EL MISMO NÚMERO EXACTO, lo que apunta a que hours_logged ES este
+     * subconjunto agrupado por periodo. Pero coincidir no es ser el mismo
+     * conjunto: hay que cruzarlos y comprobarlo. Quien sume las dos cuenta las
+     * horas dos veces, y son 1,24 millones.
+     *
+     * ⚠ SI ESTO PASA ALGÚN DÍA A INCREMENTAL: el borrado por rango va por
+     * `pay_date` y NUNCA por `effective_date`. Una línea con fecha de cierre
+     * vieja puede pagarse hoy -- Zuzunaga recuperó cuatro periodos de 2025 en un
+     * solo día, y un borrado por fecha de cierre se habría llevado filas que el
+     * archivo de esa quincena sí traía.
+     */
+    name: 'payroll_transaction',
+    // ⚠ La vista, no la tabla: es la que calcula `txn_key`. Ver arriba.
+    source: 'comp_marts.fct_payroll_transaction_v',
+    target: 'payroll_transaction',
+    schema: 'comp',
+    conflict: 'txn_key',
+    group: 'comp',
+    // Las 24, no `*`: el origen trae además bps, debit_credit, borrower,
+    // loan_branch_name, property_state y person_country, que no se espejan, y
+    // con `*` el upsert fallaría contra una tabla que no las tiene.
+    select: [
+      // La clave, calculada en la vista. Ver la nota de arriba.
+      'txn_key',
+      'emp_no',
+      // Nulo en ~22% de las líneas: hr_centralizado no las resuelve. Por eso la
+      // identidad es emp_no y no esto.
+      'person_code',
+      'person_name',
+      // El nombre como venía en el archivo, antes de resolver.
+      'employee_in_file',
+      // El veredicto del mart. NO es lo mismo que person_code IS NULL.
+      'unmatched_person',
+      // El roster manda cuando los dos hablan; esto sirve para quien el roster
+      // no puede contestar.
+      'hr_position',
+      // La de la PERSONA.
+      'branch_code',
+      'loan_number',
+      // La del PRÉSTAMO. No es la misma, y el P&L por Loan Officer depende de
+      // esa diferencia: la escalera restringe el revenue a la sucursal propia.
+      'loan_branch_code',
+      'loan_amount',
+      'pay_date',
+      // La fecha de CIERRE: coincide con completed_date en 494 de 511 líneas de
+      // comisión y es anterior a pay_date en 1.842 de 1.859, 16,6 días de
+      // media. Es lo que permitiría comparar contra el P&L por el mismo
+      // calendario -- pero eso es una decisión de la app, no de acá.
+      'effective_date',
+      // Extraídas de la descripción, arriba. Pueden faltar.
+      'hours_period_from',
+      'hours_period_to',
+      'pay_type',
+      // gl_code_credit renombrada. Ver la nota de arriba.
+      'gl_code_credit AS pay_category',
+      'adj_type',
+      // No significan nada por separado: el lead source es derivado del par, y
+      // "Base Plan" aparece cuatro veces por persona significando cosas
+      // distintas. Viajan crudas; la interpretación vive en
+      // mart_lead_source_check.
+      'plan_name',
+      'scenario',
+      // ⚠ ESTA cuenta las horas, no pay_category: son 815 líneas contra 504.
+      'is_hourly',
+      'is_recapture',
+      // Con su nombre de origen, a propósito. Ver la nota 3 de arriba.
+      'description',
+      // Con signo. Las recuperaciones son negativas y así se guardan.
+      'amount',
+    ].join(', '),
+  },
+  {
+    /*
+     * ========================================================================
      * REALTORS DEL PROGRAMA NPPM
      * ========================================================================
      *
@@ -1881,6 +2120,11 @@ const FRESHNESS: Record<SyncGroup, FreshnessProbe> = {
      * `payroll_transaction_stage` está porque `hours_logged` sale de
      * `fct_payroll_transaction`, que sale de ahí: la vista no expone un
      * `uploaded_at` propio que consultar.
+     *
+     * ⚠ Y DESDE EL 2026-09-16 ESA MISMA TABLA ALIMENTA ADEMÁS UNA QUE ESTE JOB
+     * LEE DIRECTO: `payroll_transaction`. La sonda no cambia --ya la medía-- y
+     * queda dicho para que nadie la retire pensando que sólo cubre una fuente
+     * indirecta. Hoy cubre las dos.
      *
      * ⚠ Y ES `uploaded_at` DE LAS TABLAS DE LANDING, NO `__TABLES__`. Esta
      * fuente no viene de Salesforce sino de archivos que alguien sube, así que
