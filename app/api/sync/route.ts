@@ -7,12 +7,18 @@
  * never used: an upsert leaves no window where the table is empty, which
  * matters because these tables are read by live apps.
  *
- * Eleven tables across three schemas -- b2b_metrics (Salesforce),
+ * Fifteen tables across four schemas -- b2b_metrics (Salesforce),
  * activity_report (Encompass + Salesforce, más el reclutamiento de Loan
- * Officers y la unión de los dos pipelines de contratación) y org (roster de
- * RRHH, tablero de contrataciones y los nombres de loan officer resueltos). El
- * snapshot de pipeline, que corre aparte al final y no usa `syncTable`, es el
- * duodécimo destino.
+ * Officers y la unión de los dos pipelines de contratación), org (roster de
+ * RRHH, tablero de contrataciones, nombres de loan officer resueltos y los
+ * realtors del programa NPPM) y comp (comisiones y horas). El snapshot de
+ * pipeline, que corre aparte al final y no usa `syncTable`, es el decimosexto
+ * destino.
+ *
+ * ⚠ ESTE CONTEO SE DESACTUALIZA. Decía once cuando ya había catorce specs: las
+ * de `person_name_key`, `loan_commission` y `hours_logged` entraron sin tocarlo.
+ * Si no coincide con `SYNCS.length`, el número está viejo y no hay ninguna tabla
+ * escondida.
  *
  * Order of operations is deliberate:
  *   1. authorize  2. freshness gate  3. write  4. sweep  5. verify by counting
@@ -152,10 +158,21 @@ const SWEEPABLE = new Set([
   'comp.loan_commission',
   'comp.hours_logged',
   /*
+   * Espejo de los realtors del programa NPPM. Una fila que desaparece arriba es
+   * alguien que salió del programa, y esta tabla no guarda nada propio: sus
+   * trece columnas son todas derivadas.
+   *
+   * ⚠ NO CONFUNDIR CON `org.roster_current`, acá abajo. Un realtor NPPM no es
+   * empleado por serlo --hay contratados que además están en el roster, y quien
+   * está en proceso todavía no--, así que acá no hay historia laboral que
+   * perder: lo que el barrido se lleva es la ficha del programa, no la persona.
+   */
+  'org.nppm_realtor',
+  /*
    * ⚠ `org.roster_current` NO ESTÁ ACÁ, Y NO ES UN OLVIDO.
    *
    * El sweep borra las filas que no volvieron a aparecer arriba. Para las otras
-   * diez tablas eso es exactamente lo que se quiere: son espejos de su fuente.
+   * trece tablas eso es exactamente lo que se quiere: son espejos de su fuente.
    * Para el roster, borrar a quien desapareció del archivo choca con dos cosas
    * que ya están decididas:
    *
@@ -1531,6 +1548,108 @@ const SYNCS: TableSync[] = [
       'net_amount',
       'had_recapture',
       'lines',
+    ].join(', '),
+  },
+  {
+    /*
+     * ========================================================================
+     * REALTORS DEL PROGRAMA NPPM
+     * ========================================================================
+     *
+     * Quién firmó contrato con Supreme para trabajar en la división, quién está
+     * firmando, y quién lo reclutó. 14 personas: 13 contratadas y 1 en proceso.
+     * 13 columnas más `synced_at`, todas con el mismo nombre de los dos lados.
+     *
+     * ⚠ EL FILTRO YA VIENE APLICADO desde BigQuery: las filas que llegan ya son
+     * del programa. `cargo` está para que se entienda POR QUÉ entró cada una, no
+     * para volver a filtrar -- y hoy filtrar por él da mal, ver abajo.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ `sf_nppm_flag` ES SÓLO CONTRASTE, NUNCA CRITERIO
+     * ------------------------------------------------------------------------
+     * Un `false` NO es un hueco de datos: hay 'Non-Producing Production
+     * Manager' sin marcar en el CRM que son NPPM igual. El cargo ES la sigla
+     * N-P-P-M, así que basta por sí solo, y Salesforce sólo decide en los de
+     * Business Development. Usarlo como criterio los dejaría afuera sin que nada
+     * falle.
+     *
+     * Al 2026-09-16 son cuatro: Eduardo Martinez Daboud, Marina Aguirre-Anthony,
+     * Robert Kravitz y Valeria Gonzalez Uribe. Eran cinco el día anterior --Jose
+     * Lopez Boggio salió del grupo cuando se arregló la resolución del código--
+     * así que el número se mueve y lo que hay que recordar es la regla.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ `recruited_by_bd` Y `contracted_date` VIENEN SÓLO DE SALESFORCE
+     * ------------------------------------------------------------------------
+     * Así que están vacías en los que no están marcados. Eso sí es un hueco real
+     * del CRM, no del mapeo, y no hay que taparlo.
+     *
+     * ⚠ PERO LOS DOS HUECOS NO SON EL MISMO CONJUNTO. Hay quien tiene
+     * `recruited_by_bd` y no tiene `contracted_date`: al 2026-09-16 es Nelson
+     * Calderon, marcado en Salesforce y con reclutador ('Javier Peñaloza'). Su
+     * fecha falta por otra razón, no por estar fuera del CRM.
+     *
+     * Escrito como comprobación, que es lo que no envejece: `sf_nppm_flag` y
+     * `contracted_date IS NOT NULL` NO coinciden fila a fila. Quien explique los
+     * huecos de fecha como "los que no están en Salesforce" deja ese caso sin
+     * contar.
+     *
+     * ⚠ Y TENER `contracted_date` NO IMPLICA ESTAR CONTRATADO. Albeiro Lopera
+     * tiene fecha (2026-08-26) con `estado = 'en proceso'` e `is_contracted`
+     * falso. Quien use "tiene fecha" como atajo de "está contratado" lo cuenta
+     * de más. Para eso está `is_contracted`, que es la columna que lo dice.
+     *
+     * ------------------------------------------------------------------------
+     * QUÉ VERIFICAR DESPUÉS DE UNA CORRIDA
+     * ------------------------------------------------------------------------
+     * INVARIANTES, no conteos: el programa crece.
+     *
+     *   COUNT(*) = COUNT(DISTINCT realtor_code), sin nulos. Es la clave de
+     *     conflicto y la PK del destino.
+     *   `is_contracted` = (`estado` = 'contratado') en TODA fila. Son dos
+     *     formas del mismo hecho y separarse sería un defecto de la vista.
+     *   `display_name`, `is_active`, `is_contracted`, `sf_nppm_flag` y
+     *     `sf_closed_won` sin nulos: el destino los tiene NOT NULL, así que un
+     *     nulo hace fallar el upsert entero.
+     *   El conteo de Supabase contra el de BigQuery, que `syncTable` ya compara.
+     *
+     * Al 2026-09-16: 14 filas, 13 con `estado = 'contratado'`, 12 con cargo de
+     * NPPM y 2 de Business Development. Números del día, no criterio -- los
+     * cuatro invariantes de arriba se comprobaron ese día y pasan.
+     *
+     * ⚠ ESOS 2 DE BUSINESS DEVELOPMENT VIENEN CON DOS GRAFÍAS DISTINTAS:
+     * 'Business Development' (Albeiro Lopera) y 'BUSINESS DEVELOPMENT' (Fred
+     * Gomez). Son la misma función escrita de dos maneras, así que `cargo`
+     * tiene TRES valores distintos y no dos. Filtrar por igualdad exacta trae a
+     * uno y pierde al otro -- y la regla de que el flag de Salesforce sólo
+     * decide en Business Development hay que aplicarla sin distinguir
+     * mayúsculas. Reportado; si se unifica arriba, esta nota se puede acortar.
+     */
+    name: 'nppm_realtor',
+    source: 'lending_marts.dim_nppm_realtor_v2',
+    target: 'nppm_realtor',
+    schema: 'org',
+    conflict: 'realtor_code',
+    // Las 13 listadas, no `*`: ver la nota de `lo_recruitment`.
+    select: [
+      // La clave. Ver `lending_marts.nppm_realtor_code`, que la ancla.
+      'realtor_code',
+      'display_name',
+      // El vínculo con el roster, cuando la persona está.
+      'person_code',
+      'branch_code',
+      // ⚠ TRES valores, no dos: ver la nota de las dos grafías.
+      'cargo',
+      'estado',
+      'is_contracted',
+      'is_active',
+      // Las dos de Salesforce: vacías en los cinco sin flag.
+      'recruited_by_bd',
+      'contracted_date',
+      // Contraste, nunca criterio.
+      'sf_nppm_flag',
+      'sf_closed_won',
+      'match_key',
     ].join(', '),
   },
 ];
