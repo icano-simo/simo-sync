@@ -1567,25 +1567,32 @@ const SYNCS: TableSync[] = [
      * ------------------------------------------------------------------------
      * ⚠ `sf_nppm_flag` ES SÓLO CONTRASTE, NUNCA CRITERIO
      * ------------------------------------------------------------------------
-     * Un `false` NO es un hueco de datos. Cinco de los doce 'Non-Producing
-     * Production Manager' no están marcados en el CRM y son NPPM igual: Valeria
-     * Gonzalez Uribe, Robert Kravitz, Jose Lopez Boggio, Marina Aguirre-Anthony
-     * y Eduardo Martinez Daboud. El cargo ES la sigla N-P-P-M, así que basta por
-     * sí solo. Salesforce sólo decide en los de Business Development.
+     * Un `false` NO es un hueco de datos: hay 'Non-Producing Production
+     * Manager' sin marcar en el CRM que son NPPM igual. El cargo ES la sigla
+     * N-P-P-M, así que basta por sí solo, y Salesforce sólo decide en los de
+     * Business Development. Usarlo como criterio los dejaría afuera sin que nada
+     * falle.
      *
-     * Usarlo como criterio dejaría afuera a cinco de catorce sin que nada falle.
+     * Al 2026-09-16 son cuatro: Eduardo Martinez Daboud, Marina Aguirre-Anthony,
+     * Robert Kravitz y Valeria Gonzalez Uribe. Eran cinco el día anterior --Jose
+     * Lopez Boggio salió del grupo cuando se arregló la resolución del código--
+     * así que el número se mueve y lo que hay que recordar es la regla.
      *
      * ------------------------------------------------------------------------
      * ⚠ `recruited_by_bd` Y `contracted_date` VIENEN SÓLO DE SALESFORCE
      * ------------------------------------------------------------------------
-     * Así que están vacías en esos cinco. Eso sí es un hueco real, del CRM, no
-     * del mapeo, y no hay que taparlo.
+     * Así que están vacías en los que no están marcados. Eso sí es un hueco real
+     * del CRM, no del mapeo, y no hay que taparlo.
      *
-     * ⚠ PERO `contracted_date` FALTA EN SEIS, NO EN CINCO. El sexto es Nelson
-     * Calderon, que SÍ está marcado en Salesforce y SÍ tiene `recruited_by_bd`
-     * ('Javier Peñaloza'): su fecha falta por otra razón, no por estar fuera del
-     * CRM. Contar los huecos de esa columna como "los cinco sin flag" deja ese
-     * caso sin explicar.
+     * ⚠ PERO LOS DOS HUECOS NO SON EL MISMO CONJUNTO. Hay quien tiene
+     * `recruited_by_bd` y no tiene `contracted_date`: al 2026-09-16 es Nelson
+     * Calderon, marcado en Salesforce y con reclutador ('Javier Peñaloza'). Su
+     * fecha falta por otra razón, no por estar fuera del CRM.
+     *
+     * Escrito como comprobación, que es lo que no envejece: `sf_nppm_flag` y
+     * `contracted_date IS NOT NULL` NO coinciden fila a fila. Quien explique los
+     * huecos de fecha como "los que no están en Salesforce" deja ese caso sin
+     * contar.
      *
      * ⚠ Y TENER `contracted_date` NO IMPLICA ESTAR CONTRATADO. Albeiro Lopera
      * tiene fecha (2026-08-26) con `estado = 'en proceso'` e `is_contracted`
@@ -1606,8 +1613,9 @@ const SYNCS: TableSync[] = [
      *     nulo hace fallar el upsert entero.
      *   El conteo de Supabase contra el de BigQuery, que `syncTable` ya compara.
      *
-     * Al escribir esto: 14 filas, 13 con `estado = 'contratado'`, 12 con cargo
-     * de NPPM y 2 de Business Development. Números del día, no criterio.
+     * Al 2026-09-16: 14 filas, 13 con `estado = 'contratado'`, 12 con cargo de
+     * NPPM y 2 de Business Development. Números del día, no criterio -- los
+     * cuatro invariantes de arriba se comprobaron ese día y pasan.
      *
      * ⚠ ESOS 2 DE BUSINESS DEVELOPMENT VIENEN CON DOS GRAFÍAS DISTINTAS:
      * 'Business Development' (Albeiro Lopera) y 'BUSINESS DEVELOPMENT' (Fred
