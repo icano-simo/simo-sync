@@ -500,7 +500,9 @@ const SYNCS: TableSync[] = [
      *                       del programa. Sale de `dim_realtor_code`, que es la
      *                       autoridad del código y no filtra por nada.
      *   nppm_is_member      ¿ADEMÁS está en el programa NPPM? Sale de
-     *                       `dim_nppm_realtor_v2`, las catorce personas.
+     *                       `dim_nppm_realtor_v2`, que es el padrón del
+     *                       programa y se mueve: gente que entra, y gente que
+     *                       sale por cancelarse su contratación.
      *   nppm_estado         'contratado' o 'en proceso', y sólo cuando
      *                       pertenece.
      *
@@ -528,10 +530,14 @@ const SYNCS: TableSync[] = [
      *     estado sale del programa, así que sin pertenencia no hay estado.
      *   `nppm_is_member` implica `nppm_display_name IS NOT NULL`.
      *
-     * ⚠ `nppm_estado` HOY SÓLO TOMA 'contratado'. 'en proceso' no aparece en
-     * ningún préstamo porque la única persona en ese estado --Albeiro Lopera--
-     * todavía no tiene ninguno. Que el valor no esté en el dato no significa que
-     * no exista: va a aparecer cuando esa persona empiece a producir.
+     * ⚠ `nppm_estado` HOY SÓLO TOMA 'contratado', y no hay ninguna fila con 'en
+     * proceso' -- ni acá ni en `org.nppm_realtor`. El único que lo tenía,
+     * Albeiro Lopera, salió del programa porque su contratación se canceló. El
+     * valor sigue siendo válido: simplemente no hay nadie.
+     *
+     * Que un valor no esté en el dato no significa que no exista. Acotar un
+     * filtro a lo que hoy aparece deja afuera a la primera persona que vuelva a
+     * estar en proceso.
      *
      * INVARIANTE: `nppm_realtor_code IS NOT NULL` implica
      * `nppm_display_name IS NOT NULL` -- un código sin nombre para mostrar
@@ -1682,7 +1688,17 @@ const SYNCS: TableSync[] = [
      * ========================================================================
      *
      * Quién firmó contrato con Supreme para trabajar en la división, quién está
-     * firmando, y quién lo reclutó. 14 personas: 13 contratadas y 1 en proceso.
+     * firmando, y quién lo reclutó. Al 2026-09-16 son 13, todas contratadas.
+     *
+     * ⚠ QUE EL CONTEO BAJE NO SIGNIFICA QUE ALGUIEN AVANZÓ. Eran 14 esa misma
+     * mañana, con Albeiro Lopera en 'en proceso'. Se fue de la dimensión porque
+     * su contratación quedó CANCELADA --en el tablero pasó a 'Completed New
+     * Hire' con `is_cancelled`-- no porque haya entrado al roster. La lectura
+     * cómoda es "se graduó a contratado", y era la equivocada.
+     *
+     * Para saber cuál de las dos pasó, mirar `org.hiring_tracking`: ahí la
+     * persona sigue, con su sección y su `is_cancelled`. Esta tabla sólo dice
+     * quién está hoy en el programa.
      * 13 columnas más `synced_at`, todas con el mismo nombre de los dos lados.
      *
      * ⚠ EL FILTRO YA VIENE APLICADO desde BigQuery: las filas que llegan ya son
