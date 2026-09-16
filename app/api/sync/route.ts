@@ -1020,10 +1020,29 @@ const SYNCS: TableSync[] = [
      * INVARIANTE: COUNT(*) = COUNT(DISTINCT nombre) y ningún `nombre` nulo ni
      * vacío. Ninguna tanda puede traer dos filas que colisionen.
      *
-     * Si dos personas tuvieran el mismo nombre se pisarían, y el síntoma sería
-     * que el conteo no coincide --38 filas en Supabase contra 39 en BigQuery--
-     * no un error. Hoy no pasa. Cuando pase, la salida no es cambiar la clave
-     * acá sino conseguir un identificador arriba.
+     * ------------------------------------------------------------------------
+     * ⚠ SI LA CLAVE SE REPITE EN UNA TANDA, EL UPSERT FALLA ASÍ
+     * ------------------------------------------------------------------------
+     *   upsert into hiring_tracking failed at row 0:
+     *   ON CONFLICT DO UPDATE command cannot affect row a second time
+     *
+     * Postgres rechaza la tanda ENTERA y no escribe nada. Es ruidoso y es lo
+     * correcto: pisar una fila con otra en silencio sería peor.
+     *
+     * ⚠ Y LA CAUSA CASI SEGURO NO SON DOS PERSONAS CON EL MISMO NOMBRE. Pasó el
+     * 2026-09-16 y el error se leía como homónimos, pero era otra cosa: el
+     * tablero se había cargado DOS VECES --el 3 y el 15 de septiembre-- y la
+     * vista sumaba los dos lotes en vez de quedarse con el último. Cada persona
+     * aparecía una vez por carga.
+     *
+     * Antes de buscar homónimos, mirar cuántos `upload_batch_id` trae la vista.
+     * Si es más de uno, el arreglo es filtrar al último lote arriba, no cambiar
+     * la clave acá. El mismo defecto estaba en `fct_production_payroll` y
+     * `fct_payroll_transaction`.
+     *
+     * Si alguna vez SÍ fueran dos personas distintas con el mismo nombre, ahí sí
+     * la salida es conseguir un identificador arriba -- pero ése es el segundo
+     * sospechoso, no el primero.
      *
      * ⚠ EL NOMBRE VIENE COMO LO ESCRIBIERON: 'Jorge  Betancur' trae DOS
      * ESPACIOS. Es la clave, así que corregirlo en el tablero no edita la fila
@@ -1152,6 +1171,13 @@ const SYNCS: TableSync[] = [
      * Clave de conflicto `nombre`, que es la PK del destino. Mismo razonamiento
      * --y mismo límite-- que en `hiring_tracking`: arriba no hay identificador
      * único que cruce los dos orígenes. El invariante está abajo.
+     *
+     * ⚠ Y HEREDA SU MODO DE FALLA, porque lee de esa misma vista. El 2026-09-16
+     * las dos fallaron con «ON CONFLICT DO UPDATE command cannot affect row a
+     * second time» por el mismo lote duplicado: el tablero cargado dos veces y
+     * la vista sumando los dos. Ver la nota de `hiring_tracking` -- el primer
+     * sospechoso es el conteo de `upload_batch_id`, no los homónimos. Ésta se
+     * arregló sola al arreglarse aquélla.
      *
      * ------------------------------------------------------------------------
      * ⚠ PARA PROYECTAR VA `producira`, NO EL CONTEO DE PERSONAS
