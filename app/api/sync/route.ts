@@ -1416,9 +1416,8 @@ const SYNCS: TableSync[] = [
      *   Cada `match_key` tiene UN SOLO `person_code` distinto. Dos personas
      *     detrás de la misma clave de emparejamiento es el bug que esta tabla
      *     viene a evitar, no uno que pueda tolerar.
-     *   `nombre_canonico` poblado en TODA fila con `person_code`. Sale de
-     *     `dim_person_all`, que conserva a todos los vistos alguna vez, así que
-     *     resolver implica tener nombre.
+     *   `nombre_canonico` poblado en TODA fila con `person_code`. Es el que
+     *     atrapó dos defectos seguidos -- ver abajo.
      *   `branch_del_roster`, `cargo` y las tres banderas, pobladas donde hay
      *     `person_code` Y NOT `ya_no_esta_en_el_roster`. Ésas SÍ salen del
      *     roster, y quien ya salió no las tiene.
@@ -1426,21 +1425,38 @@ const SYNCS: TableSync[] = [
      *     dice que la persona se fue, no que no se la reconoce.
      *   El conteo de Supabase contra el de BigQuery, que `syncTable` ya compara.
      *
-     * ⚠ ESE DESDOBLE ES UNA CORRECCIÓN, no un detalle. La versión anterior
-     * pedía las seis columnas del roster pobladas donde hubiera `person_code`, y
-     * eso NO ES CIERTO para quien salió: Isabel Wagner resolvía a
-     * `isabel.wagner` con `nombre_canonico` NULL, porque `roster_for_admin` ya
-     * no la nombra. Un scorecard le habría mostrado un blanco. Con
-     * `nombre_canonico` cayendo a `dim_person_all` y las otras cinco acotadas a
-     * quien sigue en el roster, el invariante vuelve a ser cierto -- y si se
-     * hubiera dejado como estaba, habría fallado siempre y se habría aprendido a
-     * ignorarlo.
+     * ------------------------------------------------------------------------
+     * ⚠ `nombre_canonico` ATRAPÓ DOS DEFECTOS, Y EL SEGUNDO ERA UN RESPALDO QUE
+     * NO RESPALDABA
+     * ------------------------------------------------------------------------
+     * La misma persona los provocó los dos: Isabel Wagner, que tiene 13
+     * préstamos y 2 cierres y salió del roster, así que `roster_for_admin` ya no
+     * la nombra.
      *
-     * Al escribir esto: 72 filas, 44 con `es_de_la_division`, 43 `person_code`
-     * distintos entre esas 44 --la diferencia es Susan Aguilar, con sus dos
-     * grafías-- y 1 con `ya_no_esta_en_el_roster`, que es Isabel Wagner: la
-     * única con producción histórica que ya salió. Esos números son la foto del
-     * día, no el criterio.
+     *   1. El invariante estaba MAL ESCRITO. Pedía las seis columnas del roster
+     *      pobladas donde hubiera `person_code`, y eso no es cierto para quien
+     *      salió: no tiene branch ni cargo. Tal como estaba habría fallado
+     *      siempre y se habría aprendido a ignorarlo. Se desdobló: sólo
+     *      `nombre_canonico` se exige en toda fila con código; las otras cinco,
+     *      acotadas a `NOT ya_no_esta_en_el_roster`.
+     *   2. El respaldo de `nombre_canonico` NO HACÍA NADA. Caía a
+     *      `dim_person_all`, que --contra lo que decía esta nota-- NO conserva a
+     *      quienes salen. O sea que el respaldo apuntaba al mismo lugar vacío:
+     *      Isabel seguía con `nombre_canonico` NULL y rompió una pantalla de
+     *      Forecast. Ahora cae a LA GRAFÍA QUE RESOLVIÓ, que siempre existe
+     *      porque es la fila misma.
+     *
+     * LA LECCIÓN DEL SEGUNDO: un respaldo hacia una fuente que tiene el mismo
+     * hueco que la principal no es un respaldo. El invariante es lo que lo
+     * distingue de uno que sí funciona, porque los dos se ven igual en el código.
+     * Éste es exactamente el que habría detectado el defecto antes de que
+     * llegara a una pantalla.
+     *
+     * Al 2026-09-16: 87 filas, 56 con `person_code`, 1 con
+     * `ya_no_esta_en_el_roster` --Isabel Wagner-- y cero violaciones de los
+     * cuatro invariantes. Eran 72 y 44 ocho días antes: Encompass agrega grafías
+     * cada vez que alguien escribe un nombre distinto, así que estos números son
+     * la foto del día y no el criterio.
      *
      * Comprobado el 2026-09-09: las columnas coinciden exactas entre la vista y
      * el destino y en el mismo orden, sin renombres; la tabla tiene su PK sobre
