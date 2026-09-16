@@ -491,35 +491,71 @@ const SYNCS: TableSync[] = [
      * principal a secas, esos tres caerían en 'unassigned realtor' SIN QUE NADA
      * FALLE, deshaciendo la regla de respaldo que el portal ya tenía.
      *
-     * ⚠ HAY UN HUECO DE LA FUENTE, Y NO SE TAPA ACÁ. Walter Mena tiene 2
-     * préstamos marcados NPPM y no está en la dimensión, así que su
-     * `nppm_realtor_code` es NULL y esos dos caen en 'unassigned realtor'. Eso
-     * es correcto: falta registrarlo como realtor NPPM en Salesforce, y
-     * inventarle un código acá escondería el hueco en vez de mostrarlo. De ahí
-     * que sean 92 de 94 con código y no 94.
+     * ------------------------------------------------------------------------
+     * ⚠ EL CÓDIGO NO ES LA PERTENENCIA, Y CONFUNDIRLOS YA COSTÓ UNA REGRESIÓN
+     * ------------------------------------------------------------------------
+     * Son dos preguntas distintas y hay dos columnas porque hacen falta las dos:
      *
-     * INVARIANTES de estas tres, comprobados el 2026-09-08 sobre 4,916 filas:
-     *   `nppm_realtor_code IS NOT NULL` implica `nppm_display_name IS NOT NULL`
-     *     -- un código sin nombre para mostrar dejaría la pantalla en blanco.
-     *   10 realtors distintos entre los 92 préstamos con `strategy = 'NPPM'`.
+     *   nppm_realtor_code   ¿QUIÉN es este realtor? Lo tienen TODOS, sea o no
+     *                       del programa. Sale de `dim_realtor_code`, que es la
+     *                       autoridad del código y no filtra por nada.
+     *   nppm_is_member      ¿ADEMÁS está en el programa NPPM? Sale de
+     *                       `dim_nppm_realtor_v2`, las catorce personas.
+     *   nppm_estado         'contratado' o 'en proceso', y sólo cuando
+     *                       pertenece.
+     *
+     * Al 2026-09-16: 275 filas con código, 92 con pertenencia. O sea 183 filas
+     * cuyo realtor tiene código y NO es del programa -- y ésa es exactamente la
+     * población que desaparece si se confunden.
+     *
+     * ⚠ QUÉ PASÓ EL 15 DE SEPTIEMBRE, porque el error es fácil de repetir. La
+     * dimensión del programa se usó como autoridad del código, así que resolver
+     * el código quedó condicionado a pertenecer. Resultado: los préstamos de
+     * realtors de afuera perdieron el código y la resolución cayó de 92/94 a
+     * 85/95, con Jose Boggio --que SÍ es del programa-- perdiendo el suyo por un
+     * `match_key` que dejó de cruzar. Separadas las dos vistas, hoy son 95 de
+     * 95.
+     *
+     * NO FILTRAR EL CÓDIGO POR LA PERTENENCIA. Agrupar producción va por código;
+     * saber si esa persona está en el programa va por `nppm_is_member`. Un
+     * `false` ahí no es un hueco: es un realtor que trabajó con la división sin
+     * estar en el programa, y hoy son seis préstamos de estrategia NPPM.
+     *
+     * INVARIANTES de estas dos, comprobados el 2026-09-16:
+     *   `nppm_is_member` implica `nppm_realtor_code IS NOT NULL` -- pertenecer
+     *     sin tener código sería un defecto de la separación.
+     *   `nppm_estado IS NOT NULL` coincide EXACTAMENTE con `nppm_is_member`: el
+     *     estado sale del programa, así que sin pertenencia no hay estado.
+     *   `nppm_is_member` implica `nppm_display_name IS NOT NULL`.
+     *
+     * ⚠ `nppm_estado` HOY SÓLO TOMA 'contratado'. 'en proceso' no aparece en
+     * ningún préstamo porque la única persona en ese estado --Albeiro Lopera--
+     * todavía no tiene ninguno. Que el valor no esté en el dato no significa que
+     * no exista: va a aparecer cuando esa persona empiece a producir.
+     *
+     * INVARIANTE: `nppm_realtor_code IS NOT NULL` implica
+     * `nppm_display_name IS NOT NULL` -- un código sin nombre para mostrar
+     * dejaría la pantalla en blanco.
      *
      * ⚠ Y HAY DOS CONTEOS DE `nppm_realtor_code`, NO UNO. Los dos son correctos
      * y confundirlos hace parecer que la resolución se rompió:
      *
-     *   COUNT(*) WHERE nppm_realtor_code IS NOT NULL             241 filas
-     *   COUNT(*) WHERE strategy = 'NPPM' AND code IS NOT NULL     92 filas
+     *   COUNT(*) WHERE nppm_realtor_code IS NOT NULL             todas las filas
+     *                                                            que traen
+     *                                                            realtor
+     *   COUNT(*) WHERE strategy = 'NPPM' AND code IS NOT NULL     sólo las de
+     *                                                            esa estrategia
      *
      * La diferencia son préstamos de OTRAS estrategias cuyo realtor igual es un
      * NPPM: el código se resuelve para cualquier fila que traiga realtor, no
-     * sólo para las de esa estrategia. Contar realtors sobre las 241 da 29
-     * distintos; sobre las 92, da 10.
+     * sólo para las de esa estrategia. Al 2026-09-16 son 275 y 95.
      *
-     * Cuando la vista se reescribió, el 29 apareció donde antes había 10 y por
-     * un momento pareció que los nombres se habían vuelto a partir -- 92
-     * préstamos entre 29 realtors baja el promedio de 9 a 3 por persona, que en
-     * pantalla se lee como productividad repartida. No era eso: eran dos
-     * medidas distintas. El que hay que mirar para juzgar la RESOLUCIÓN es el de
-     * 10, acotado a la estrategia.
+     * Cuando la vista se reescribió, el conteo amplio apareció donde antes se
+     * miraba el acotado y por un momento pareció que los nombres se habían
+     * vuelto a partir: más realtors para los mismos préstamos baja el promedio
+     * por persona, y en pantalla eso se lee como productividad repartida. No era
+     * eso: eran dos medidas distintas. **El que sirve para juzgar la RESOLUCIÓN
+     * es el acotado a la estrategia.**
      *
      * INVARIANTE: `counts_for_division` implica `is_closed`, nunca al revés --
      * o sea `COUNTIF(counts_for_division AND NOT is_closed) = 0`. Comprobado el
@@ -582,15 +618,19 @@ const SYNCS: TableSync[] = [
       'buyers_agent',
       'nppm_realtor',
       /*
-       * LA IDENTIDAD DEL REALTOR NPPM, resuelta arriba. Las tres van juntas y
+       * LA IDENTIDAD DEL REALTOR NPPM, resuelta arriba. Las cinco van juntas y
        * ninguna sobra -- ver la nota del spec.
        *   nppm_realtor_efectivo  el nombre con el COALESCE ya aplicado
        *   nppm_realtor_code      la clave estable, y la unica que se joinea
        *   nppm_display_name      el nombre para mostrar
+       *   nppm_is_member         si ademas pertenece al programa
+       *   nppm_estado            contratado / en proceso, cuando pertenece
        */
       'nppm_realtor_efectivo',
       'nppm_realtor_code',
       'nppm_display_name',
+      'nppm_is_member',
+      'nppm_estado',
       'realtor_es_nppm',
       'nppm_recruited_by',
       'opportunity_owner',
