@@ -1725,32 +1725,47 @@ const SYNCS: TableSync[] = [
      * quedarían con la clave vieja, el upsert dejaría de encontrarlas e
      * insertaría duplicados en vez de actualizar.
      *
-     * La vista tiene que exponer `txn_key` así, y medido: 1.859 valores
-     * distintos sobre 1.859 filas.
+     * La vista expone `txn_key` como el SHA256 de estos seis campos, en este
+     * orden. VERIFICADA: 1.859 filas, 1.859 claves distintas, 0 nulas, 0
+     * vacías, las 64 posiciones del hash en todas.
      *
-     *   CONCAT(
-     *     emp_no, '|', CAST(pay_date AS STRING), '|', pay_type, '|',
-     *     COALESCE(loan_number, ''), '|', COALESCE(description, ''), '|',
-     *     CAST(amount AS STRING)
-     *   ) AS txn_key
+     *   emp_no | pay_date | pay_type | loan_number | description | amount
      *
-     * ⚠ EL `COALESCE` NO ES DEFENSIVO, ES LO QUE HACE QUE FUNCIONE. Es la misma
-     * lección de `hours_logged_v`, y acá pega mucho más fuerte: allá fallaban 4
-     * filas de 731 por una descripción rara; acá `loan_number` ES NULO EN LA
-     * MAYORÍA DE LAS LÍNEAS -- Bonus, las horas, casi todo lo que no es
-     * comisión. Concatenar un NULL da NULL en toda la expresión, así que sin
-     * COALESCE la clave sería nula en más de la mitad de la tabla.
+     * ⚠ ES UN HASH Y NO LA CONCATENACIÓN, así que la clave NO SE PUEDE LEER
+     * para saber de qué fila es. Eso cuesta al depurar y se paga a cambio de
+     * largo fijo --una descripción larga no la hace crecer-- y de no llevar
+     * datos de una persona dentro de un identificador.
      *
-     * ⚠ Y HAY QUE COMPROBAR QUE `description` NO CONTENGA `|`. Es texto libre:
-     * un `|` dentro movería el troceo y dos filas distintas podrían producir la
-     * misma clave. Si aparece, se escapa o se pasa a un hash.
+     * ⚠ EL `COALESCE` NO ES DEFENSIVO, ES LO QUE HACE QUE LA CLAVE EXISTA. Es
+     * la lección de `hours_logged_v`, y acá pega mucho más fuerte. Allá
+     * fallaban 4 filas de 731 por una descripción rara; acá, medido sobre las
+     * 1.859:
+     *
+     *   1.120 filas sin `loan_number`   -- el 60%
+     *     243 filas sin `description`
+     *
+     * Concatenar un NULL da NULL en toda la expresión. Sin COALESCE la clave
+     * sería nula en MÁS DE LA MITAD de la tabla.
+     *
+     * ⚠ Y VA SOLO EN ESAS DOS, A PROPÓSITO. `emp_no`, `pay_date`, `pay_type` y
+     * `amount` no pueden faltar, y si algún día faltan la clave sale nula y la
+     * carga revienta contra el NOT NULL del destino. Eso es lo correcto: un
+     * fallo ruidoso, no una clave inventada sobre un hueco.
+     *
+     * ⚠ Y HAY QUE VOLVER A MIRAR SI APARECE UN `|` DENTRO DE UNA DESCRIPCIÓN.
+     * El hash no quita la ambigüedad del separador, sólo la esconde: hoy salen
+     * 1.859 distintas y por eso no hay problema, pero si un día el conteo de
+     * claves baja sin que baje el de filas, es esto.
      *
      * ------------------------------------------------------------------------
      * ⚠ LA CLAVE NO LLEVA ORDINAL, Y NINGUNA COMBINACIÓN MÁS CORTA VALE
      * ------------------------------------------------------------------------
-     * Un ROW_NUMBER() la habría hecho única por construcción, pero sólo aguanta
-     * mientras la carga sea completa. Las seis columnas de negocio aguantan las
-     * dos, así que si esto pasa algún día a incremental la clave sigue valiendo.
+     * Un ROW_NUMBER() la habría hecho única por construcción, y no es estable:
+     * este job lee la vista ENTERA en cada corrida, así que el ordinal se
+     * recalcularía cada vez, y un ROW_NUMBER() sin `ORDER BY` determinista no
+     * da el mismo resultado ni con los mismos datos. Nada acá da un orden
+     * natural del que colgarlo. Las seis columnas de negocio no tienen ese
+     * problema: valen lo mismo se lean cuando se lean.
      *
      * Y hacen falta las seis. A este grano nada más corto es único:
      *
@@ -1854,11 +1869,39 @@ const SYNCS: TableSync[] = [
      * conjunto: hay que cruzarlos y comprobarlo. Quien sume las dos cuenta las
      * horas dos veces, y son 1,24 millones.
      *
-     * ⚠ SI ESTO PASA ALGÚN DÍA A INCREMENTAL: el borrado por rango va por
-     * `pay_date` y NUNCA por `effective_date`. Una línea con fecha de cierre
-     * vieja puede pagarse hoy -- Zuzunaga recuperó cuatro periodos de 2025 en un
-     * solo día, y un borrado por fecha de cierre se habría llevado filas que el
-     * archivo de esa quincena sí traía.
+     * ------------------------------------------------------------------------
+     * ⚠ COMPENSAFE YA CARGA INCREMENTAL, Y EL BARRIDO SIGUE SIENDO CORRECTO
+     * ------------------------------------------------------------------------
+     * La carga del 2026-09-16 trajo 49 filas de un solo corte de pago --el 30
+     * de septiembre-- contra las 1.578 del histórico del día anterior. Son dos
+     * cosas distintas y sólo la primera es incremental:
+     *
+     *   COMPENSAFE -> STAGE    incremental. 49 filas de un corte.
+     *   MART -> VISTA          acumula. La vista devuelve las 1.859.
+     *   VISTA -> SUPABASE      este job lee la vista ENTERA cada corrida.
+     *
+     * Así que el sweep borra lo que la VISTA no devolvió, no lo que el archivo
+     * de hoy no traía. Sigue significando "esta fila ya no existe arriba".
+     *
+     * ⚠ Y NO ES UNA DEDUCCIÓN, ESTÁ MEDIDO EN LA TABLA DE AL LADO:
+     * `comp.hours_logged` lleva semanas con esta misma fuente y hoy tiene 738
+     * filas que van del 2025-09-15 al 2026-09-30 -- UN AÑO ENTERO -- con un
+     * único `synced_at`. Si la vista devolviera sólo el último corte, el sweep
+     * la habría dejado en una quincena hace semanas. Y ha crecido, nunca
+     * encogido: 448 -> 731 -> 738, igual que `loan_commission` 361 -> 470.
+     *
+     * ⚠ EL RIESGO QUE SÍ QUEDA, Y VALE PARA LAS TRES DE COMPENSAFE: la guarda
+     * es `rows.length > 0`, o sea que protege de que el origen devuelva CERO,
+     * no de que devuelva POCO. Si un día la vista pasara a exponer sólo el
+     * último corte devolvería 49 filas, la guarda no saltaría y el sweep
+     * borraría las otras 1.810 sin un solo error. Es anterior a esta tabla y
+     * no se cambia acá; queda dicho.
+     *
+     * ⚠ SI EL BORRADO PASARA ALGÚN DÍA A SER POR RANGO: va por `pay_date` y
+     * NUNCA por `effective_date`. Una línea con fecha de cierre vieja puede
+     * pagarse hoy -- Zuzunaga recuperó cuatro periodos de 2025 en un solo día, y
+     * un borrado por fecha de cierre se habría llevado filas que el archivo de
+     * esa quincena sí traía.
      */
     name: 'payroll_transaction',
     // ⚠ La vista, no la tabla: es la que calcula `txn_key`. Ver arriba.
