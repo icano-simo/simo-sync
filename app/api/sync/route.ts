@@ -1794,11 +1794,16 @@ const SYNCS: TableSync[] = [
      *    descripción rara, y las dos tablas dejarían de cuadrar sin que nada
      *    falle. Y pueden faltar sin que sea un error -- 4 de 731 allá.
      *
-     * 2. `gl_code_credit` SE ESCRIBE EN `pay_category`, renombrada. El nombre
-     *    del origen promete un código contable y lo que trae son categorías de
-     *    pago: Non-Recoverable Hours 253, Recoverable Hours 251,
-     *    Non-Recoverable Salary 190, Recoverable Salary 1, y nulo en Commission,
-     *    Bonus y Override. NO sirve para cuadrar contra el P&L.
+     * 2. `gl_code_credit` VIAJA CON SU NOMBRE DE ORIGEN. Hasta el 2026-09-16 se
+     *    escribía renombrada como `pay_category`, y ese renombre se fue cuando
+     *    el destino se alineó con la vista.
+     *
+     *    ⚠ PERO EL NOMBRE SIGUE PROMETIENDO LO QUE NO CUMPLE: suena a código
+     *    contable y lo que trae son categorías de pago --Non-Recoverable Hours
+     *    253, Recoverable Hours 251, Non-Recoverable Salary 190, Recoverable
+     *    Salary 1, y nulo en Commission, Bonus y Override--. NO sirve para
+     *    cuadrar contra el P&L. El renombre intentaba avisarlo desde el nombre;
+     *    ahora lo avisa esta nota.
      *
      *    ⚠ Y SÓLO CUBRE 2026. Las 311 líneas de horas de 2025 vienen sin
      *    categoría porque Compensafe empezó a clasificar después. NO SE RELLENA
@@ -1857,9 +1862,12 @@ const SYNCS: TableSync[] = [
      *   `emp_no`, `pay_date`, `pay_type` y `amount` sin nulos.
      *   Que `hours_period_from` y `_to` falten NO es un defecto. Verificarlas
      *     como obligatorias es lo que rompió la carga de `hours_logged`.
-     *   Que `pay_category` falte en 2025 TAMPOCO. Son 311 líneas y es la fuente
-     *     la que no clasificaba entonces.
-     *   Earnings Recapture tiene que sumar NEGATIVO.
+     *   Que `gl_code_credit` falte en 2025 TAMPOCO. Son 311 líneas y es la
+     *     fuente la que no clasificaba entonces. Hoy falta en 1.164 de 1.859,
+     *     porque además es nulo en Commission, Bonus y Override.
+     *   `is_recapture` implica `amount < 0` -- las 252, sin excepción. Al revés
+     *     NO vale: hay 17 negativas que no son recapturas.
+     *   `unmatched_person` = (`person_code` IS NULL), hoy fila a fila.
      *
      * ⚠ Y UNA QUE NO ES UN INVARIANTE SINO UNA PREGUNTA ABIERTA, A CERRAR ANTES
      * DE QUE NINGUNA PANTALLA LEA LAS DOS TABLAS: `comp.hours_logged` tiene 738
@@ -1910,26 +1918,57 @@ const SYNCS: TableSync[] = [
     schema: 'comp',
     conflict: 'txn_key',
     group: 'comp',
-    // Las 24, no `*`: el origen trae además bps, debit_credit, borrower,
-    // loan_branch_name, property_state y person_country, que no se espejan, y
-    // con `*` el upsert fallaría contra una tabla que no las tiene.
+    /*
+     * Las 30, no `*`. Eran 24 hasta el 2026-09-16: el destino se había creado
+     * con 25 columnas y le faltaban `borrower`, `debit_credit`,
+     * `gl_code_credit`, `loan_branch_name`, `property_state`, `bps` y
+     * `person_country`. Ya está alineado, así que las seis últimas entran y el
+     * renombre a `pay_category` se fue -- ver la nota de esa línea.
+     *
+     * Las dos de metadatos del cargador --`upload_batch_id` y `uploaded_at`--
+     * siguen fuera: la vista trae 32 y el destino tiene 30 más `synced_at`.
+     */
     select: [
       // La clave, calculada en la vista. Ver la nota de arriba.
       'txn_key',
       'emp_no',
-      // Nulo en ~22% de las líneas: hr_centralizado no las resuelve. Por eso la
-      // identidad es emp_no y no esto.
+      /*
+       * ⚠ NULO EN 292 LÍNEAS (15,7%), Y LA CAUSA ES UN SUFIJO -- no un hueco
+       * irreducible de la fuente.
+       *
+       * Son 32 PERSONAS, y LAS 32 traen `(I)` en el nombre del archivo:
+       * 'Aguilar Soto, Susan (I)', 'Aguillon, Ludwig (I)'. Cero de las no
+       * resueltas viene sin ese sufijo. O sea que la resolución contra
+       * `hr_centralizado.person_name_key` no lo está quitando antes de
+       * emparejar; Susan Aguilar y Ludwig Aguillon están en el roster.
+       *
+       * Se cargan igual, con el nulo a la vista: taparlo acá escondería el
+       * defecto. Cuando se arregle arriba, el barrido reemplaza las filas.
+       *
+       * Por esto la identidad es `emp_no` y no esto.
+       */
       'person_code',
       'person_name',
       // El nombre como venía en el archivo, antes de resolver.
       'employee_in_file',
-      // El veredicto del mart. NO es lo mismo que person_code IS NULL.
+      /*
+       * El veredicto del mart. Acá decía que NO era lo mismo que
+       * `person_code IS NULL`; medido el 2026-09-16, COINCIDEN FILA A FILA, con
+       * cero diferencias en las 1.859. Si alguna vez se separan, es que el mart
+       * empezó a distinguir dos cosas -- y ahí este comentario vuelve a valer.
+       */
       'unmatched_person',
       // El roster manda cuando los dos hablan; esto sirve para quien el roster
       // no puede contestar.
       'hr_position',
       // La de la PERSONA.
       'branch_code',
+      /*
+       * ⚠ NULO EN EL 60% --1.120 de 1.859-- Y NO ES UN DEFECTO. Muchas líneas
+       * no son por un préstamo: salarios por hora, bonos, ajustes. Filtrar por
+       * `loan_number IS NOT NULL` descarta MÁS DE LA MITAD de la nómina, y el
+       * total que queda se ve razonable, así que el error no avisa.
+       */
       'loan_number',
       // La del PRÉSTAMO. No es la misma, y el P&L por Loan Officer depende de
       // esa diferencia: la escalera restringe el revenue a la sucursal propia.
@@ -1945,8 +1984,15 @@ const SYNCS: TableSync[] = [
       'hours_period_from',
       'hours_period_to',
       'pay_type',
-      // gl_code_credit renombrada. Ver la nota de arriba.
-      'gl_code_credit AS pay_category',
+      /*
+       * ⚠ ACÁ IBA `gl_code_credit AS pay_category`, Y EL RENOMBRE SE FUE.
+       *
+       * La tabla destino se alineó con la vista el 2026-09-16: `pay_category`
+       * dejó de existir y entró `gl_code_credit` con su nombre propio. Con el
+       * renombre puesto, el upsert mandaba una columna que la tabla ya no tiene
+       * y la carga se caía entera.
+       */
+      'gl_code_credit',
       'adj_type',
       // No significan nada por separado: el lead source es derivado del par, y
       // "Base Plan" aparece cuatro veces por persona significando cosas
@@ -1954,13 +2000,36 @@ const SYNCS: TableSync[] = [
       // mart_lead_source_check.
       'plan_name',
       'scenario',
-      // ⚠ ESTA cuenta las horas, no pay_category: son 815 líneas contra 504.
+      // ⚠ ESTA cuenta las horas, no el código contable: son 815 líneas.
       'is_hourly',
+      /*
+       * ⚠ SUMAR `amount` SIN MIRAR ESTA COLUMNA DA EL NETO. Una recaptura es
+       * plata que se pagó y después se reclamó. El neto es correcto para el
+       * P&L; NO lo es para contestar "cuánto se le pagó" a una persona.
+       *
+       * Verificado: las 252 recapturas tienen `amount < 0`, sin excepción -- más
+       * fuerte que "suele ser negativo", y sirve de invariante.
+       *
+       * ⚠ PERO AL REVÉS NO VALE: 17 filas tienen monto negativo SIN ser
+       * recapturas, y son de `pay_type` 'Bonus' y 'Commission'. Tomar el signo
+       * como sinónimo de recaptura las etiqueta mal. La columna es ésta.
+       */
       'is_recapture',
       // Con su nombre de origen, a propósito. Ver la nota 3 de arriba.
       'description',
       // Con signo. Las recuperaciones son negativas y así se guardan.
       'amount',
+      /*
+       * LAS SEIS QUE ANTES NO SE ESPEJABAN. El comentario de la lista decía que
+       * el origen las traía y el destino no; eso valía cuando la tabla tenía 25
+       * columnas. Se alineó el 2026-09-16 y ahora existen las dos puntas.
+       */
+      'borrower',
+      'debit_credit',
+      'loan_branch_name',
+      'property_state',
+      'person_country',
+      'bps',
     ].join(', '),
   },
   {
