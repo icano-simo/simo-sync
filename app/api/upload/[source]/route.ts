@@ -61,13 +61,29 @@ export const maxDuration = 300;
  * de las 08:00 UTC. Sin esto, un Encompass subido a las 3 de la tarde no se ve
  * hasta el día siguiente -- una regresión frente a la carga directa anterior.
  *
- * SÓLO PARA LAS FUENTES QUE ALIMENTAN UNA TABLA SINCRONIZADA. Blast y las cuatro
- * de Compensafe escriben tablas que el sync no lee, así que dispararlo por ellas
- * serían 20 segundos de trabajo para nada.
+ * SÓLO PARA LAS FUENTES QUE ALIMENTAN UNA TABLA SINCRONIZADA. Dispararlo por una
+ * que no lo hace serían treinta segundos de trabajo para nada.
  *
  *   encompass              -> activity_report.loan_records_v2  (Commercial Activity)
  *   pipeline               -> pipeline_forecast.*              (Forecast & Pipeline)
  *   roster_co / roster_us  -> org.roster_current               (Admin)
+ *   comp_plan_tier         -> comp.*                           (Compensación)
+ *   comp_production
+ *   comp_by_loan
+ *   comp_transactions
+ *
+ * ⚠ LAS CUATRO DE COMPENSAFE SE AGREGARON EL 2026-09-17, y antes esta nota decía
+ * que escribían tablas que el sync no lee. Dejó de ser cierto cuando entraron
+ * `comp.loan_commission`, `comp.hours_logged` y `comp.payroll_transaction`.
+ *
+ * ⚠ Y DISPARAN LAS CUATRO, NO SÓLO LA ÚLTIMA. Kelly sube los cuatro archivos
+ * seguidos, así que lo barato sería disparar sólo con el último -- pero el orden
+ * cambia entre días: el 15 de septiembre subió en un orden y el 17 en otro. Un
+ * disparo atado a un archivo concreto depende de que el orden no cambie, y ya
+ * cambió. Cuatro corridas seguidas es el precio de no depender de eso.
+ *
+ * Por qué no una segunda corrida del cron: Kelly cargó a las 15:04 un lunes y a
+ * las 9:28 el jueves. Ningún horario fijo la cubre; el disparo sí.
  *
  * En 'pipeline' pesa todavía más que en 'encompass': ese archivo se sube dos o
  * tres veces al día JUSTAMENTE porque hace falta el dato fresco. Esperar al cron
@@ -85,7 +101,16 @@ export const maxDuration = 300;
  * Correr el sync antes de eso no lo adelanta: leería de BigQuery lo mismo que ya
  * está.
  */
-const SYNC_AFTER_UPLOAD = new Set(['encompass', 'pipeline', 'roster_co', 'roster_us']);
+const SYNC_AFTER_UPLOAD = new Set([
+  'encompass',
+  'pipeline',
+  'roster_co',
+  'roster_us',
+  'comp_plan_tier',
+  'comp_production',
+  'comp_by_loan',
+  'comp_transactions',
+]);
 
 /** Cuánto se espera para poder CONTAR qué pasó. El sync sigue si no contesta. */
 const SYNC_CONFIRM_MS = 5_000;
@@ -197,17 +222,44 @@ async function writeLog(
  */
 async function recordSyncOutcome(logId: number, result: SyncTrigger): Promise<void> {
   try {
-    const { error } = await getAdminUploadsClient('uploads')
+    /*
+     * `count: 'exact'` NO ES DECORATIVO -- distingue los dos modos de fallo, que
+     * se ven igual desde acá y se arreglan distinto:
+     *
+     *   error 42501, 'permission denied'   falta el GRANT. Postgres RECHAZA.
+     *   sin error y count = 0              RLS filtró: la fila existe y la
+     *                                      política no deja verla. No hay error
+     *                                      porque no hay nada que rechazar.
+     *
+     * El segundo es el que esta app ya se comió dos veces. Sin el conteo, un
+     * update que no tocó ninguna fila se reporta como éxito.
+     */
+    const { error, count } = await getAdminUploadsClient('uploads')
       .from('load_log')
-      .update({
-        sync_status: result.ok ? 'ok' : 'error',
-        sync_error: result.ok ? null : result.error,
-        sync_finished_at: new Date().toISOString(),
-      })
+      .update(
+        {
+          sync_status: result.ok ? 'ok' : 'error',
+          sync_error: result.ok ? null : result.error,
+          sync_finished_at: new Date().toISOString(),
+        },
+        { count: 'exact' },
+      )
       .eq('id', logId);
 
     if (error) {
-      console.error(`[upload] could not record sync outcome on load_log ${logId}: ${error.message}`);
+      console.error(
+        `[upload] could not record sync outcome on load_log ${logId}: ${error.message}. ` +
+          'Si dice permission denied, falta: GRANT UPDATE ON uploads.load_log TO service_role.',
+      );
+      return;
+    }
+
+    if (count === 0) {
+      console.error(
+        `[upload] sync outcome NOT recorded on load_log ${logId}: el update no afectó ninguna ` +
+          'fila y no hubo error. Es RLS filtrando, no un id inexistente: la fila se acaba de ' +
+          'insertar en esta misma request.',
+      );
     }
   } catch (err) {
     console.error(
@@ -699,6 +751,23 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ source: st
           error: 'CRON_SECRET is not configured; the nightly cron will pick it up',
         };
         console.error('[upload] cannot trigger sync: CRON_SECRET is not set');
+
+        /*
+         * ⚠ ESTO FALTABA, Y HACÍA INDISTINGUIBLE ESTE CASO DE "no pasó nada".
+         *
+         * La rama dejaba el motivo SÓLO en la consola, así que `sync_status` y
+         * `sync_error` quedaban nulos igual que si el disparo nunca se hubiera
+         * intentado. Alguien mirando la tabla para saber por qué no se sincroniza
+         * podía descartar la falta del secreto --"si fuera eso, `sync_error` lo
+         * diría"-- y el razonamiento era correcto sobre un código que no
+         * registraba nada.
+         *
+         * Se registra dentro de `after()` por lo mismo que el otro caso: la
+         * respuesta ya se fue.
+         */
+        if (logId !== null) {
+          after(() => recordSyncOutcome(logId, sync));
+        }
       } else {
         const running = triggerSync(req.nextUrl.origin, secret).then(async (result) => {
           if (!result.ok) {
