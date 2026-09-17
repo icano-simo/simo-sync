@@ -71,6 +71,13 @@ export const maxDuration = 300;
  *   comp_production
  *   comp_by_loan
  *   comp_transactions
+ *   hr_hiring              -> org.hiring_tracking Y
+ *                             activity_report.future_loan_officer
+ *
+ * ⚠ `hr_hiring` ALIMENTA DOS TABLAS, no una: el tablero que sube Ricardo entra a
+ * `org.hiring_tracking`, y `fct_future_loan_officer` lo une con el reclutamiento
+ * de Salesforce. Sin el disparo, subirlo a la mañana no movía ninguna de las dos
+ * hasta el cron -- el mismo problema que las de Compensafe, con otra persona.
  *
  * ⚠ LAS CUATRO DE COMPENSAFE SE AGREGARON EL 2026-09-17, y antes esta nota decía
  * que escribían tablas que el sync no lee. Dejó de ser cierto cuando entraron
@@ -110,6 +117,7 @@ const SYNC_AFTER_UPLOAD = new Set([
   'comp_production',
   'comp_by_loan',
   'comp_transactions',
+  'hr_hiring',
 ]);
 
 /** Cuánto se espera para poder CONTAR qué pasó. El sync sigue si no contesta. */
