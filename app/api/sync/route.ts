@@ -1760,12 +1760,23 @@ const SYNCS: TableSync[] = [
      * ------------------------------------------------------------------------
      * ⚠ LA CLAVE NO LLEVA ORDINAL, Y NINGUNA COMBINACIÓN MÁS CORTA VALE
      * ------------------------------------------------------------------------
-     * Un ROW_NUMBER() la habría hecho única por construcción, y no es estable:
-     * este job lee la vista ENTERA en cada corrida, así que el ordinal se
-     * recalcularía cada vez, y un ROW_NUMBER() sin `ORDER BY` determinista no
-     * da el mismo resultado ni con los mismos datos. Nada acá da un orden
-     * natural del que colgarlo. Las seis columnas de negocio no tienen ese
-     * problema: valen lo mismo se lean cuando se lean.
+     * Un ROW_NUMBER() la habría hecho única por construcción, y habría sido un
+     * RIESGO PERMANENTE, NO CONDICIONAL. No es "mientras la carga sea completa"
+     * ni "el día que pase a incremental": este job lee la vista ENTERA en CADA
+     * corrida, así que el ordinal se recalcularía CADA VEZ, y un ROW_NUMBER()
+     * sin `ORDER BY` determinista no da el mismo resultado ni con los mismos
+     * datos. Nada acá da un orden natural del que colgarlo.
+     *
+     * Y el fallo sería SILENCIOSO: al reordenarse, la fila vieja conserva la
+     * clave vieja, el upsert no la encuentra e INSERTA en vez de actualizar.
+     * Duplicados, no un error.
+     *
+     * ⚠ NO SE SOSTIENE QUE "SE HABRÍA ROTO EN LA CARGA DEL 2026-09-16". Las 49
+     * filas que trajo son de un corte de pago NUEVO, así que caen en
+     * particiones que no existían y no tocan el orden de ninguna anterior. La
+     * razón de verdad es la de arriba y es peor: no hace falta que llegue nada
+     * nuevo. Las seis columnas de negocio no tienen ese problema: valen lo
+     * mismo se lean cuando se lean.
      *
      * Y hacen falta las seis. A este grano nada más corto es único:
      *
@@ -2520,6 +2531,39 @@ async function syncTable(
     throw new Error(`refusing to sweep protected table ${qualified(spec)}`);
   }
 
+  /*
+   * ⚠ TAREA ABIERTA: ESTA GUARDA PROTEGE DE CERO, NO DE POCO.
+   * ───────────────────────────────────────────────────────────────────────
+   * Un origen que devuelve 0 filas no barre, y eso está bien. Un origen que
+   * devuelve POCAS barre igual, y eso es el agujero: con el sweep detrás, una
+   * vista que empezara a exponer sólo el último corte de pago devolvería 49
+   * filas en vez de 1.859 y el sweep borraría las otras 1.810 SIN UN SOLO
+   * ERROR. El job diría que fue bien.
+   *
+   * Vale para las tres de Compensafe y para las demás: nada acá distingue
+   * "el origen encogió" de "el origen se vació a medias".
+   *
+   * ⚠ Y HAY PRECEDENTE EN ESTE MISMO REPOSITORIO, en el camino de subida:
+   * `app/api/upload/[source]/route.ts` compara `parsed.rows.length` contra
+   * `sourceRow.min_rows_expected` ANTES de tocar BigQuery, y devuelve 422 con
+   * `filas_encontradas` y `filas_minimas` en el detalle. Tres cosas de ese
+   * diseño valen igual acá:
+   *
+   *   · el umbral es DATO, no código: una columna de `uploads.source`, una
+   *     fila por fuente, así que cambiarlo no es desplegar;
+   *   · se comprueba ANTES de escribir, así que no hay escritura parcial que
+   *     deshacer -- acá el sitio es entre la lectura y el upsert;
+   *   · falla con el detalle puesto, no con un booleano.
+   *
+   * QUÉ HARÍA FALTA: un mínimo por spec, HOLGADO --no el conteo de ayer, que
+   * convertiría cualquier baja legítima en un fallo-- y que un origen por
+   * debajo aborte la corrida de esa tabla en vez de barrer. Convierte un
+   * borrado silencioso en una corrida fallida, que es lo que se quiere.
+   *
+   * NO ES URGENTE y no se hace acá: hoy ninguna vista expone un trozo. Queda
+   * escrito donde está el riesgo y no en un documento aparte, porque quien
+   * vaya a tocar el sweep va a leer esto y no el documento.
+   */
   if (rows.length === 0) {
     // A source returning zero rows is a source failure, not a mass deletion.
     // Sweeping here would empty the table on an upstream hiccup.
