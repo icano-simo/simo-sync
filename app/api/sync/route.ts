@@ -1933,19 +1933,26 @@ const SYNCS: TableSync[] = [
       'txn_key',
       'emp_no',
       /*
-       * ⚠ NULO EN 292 LÍNEAS (15,7%), Y LA CAUSA ES UN SUFIJO -- no un hueco
-       * irreducible de la fuente.
+       * ⚠ NULO EN 288 LÍNEAS / 31 PERSONAS, Y NO ES UN DEFECTO DE RESOLUCIÓN.
        *
-       * Son 32 PERSONAS, y LAS 32 traen `(I)` en el nombre del archivo:
-       * 'Aguilar Soto, Susan (I)', 'Aguillon, Ludwig (I)'. Cero de las no
-       * resueltas viene sin ese sufijo. O sea que la resolución contra
-       * `hr_centralizado.person_name_key` no lo está quitando antes de
-       * emparejar; Susan Aguilar y Ludwig Aguillon están en el roster.
+       * El archivo de Compensafe trae A TODA LA EMPRESA, no sólo a la división.
+       * Esas 31 personas no están en `hr_centralizado.person_name_key` porque no
+       * están en el sistema de personas de la división: Ludwig Aguillon salió
+       * del roster, Patty Anderson nunca estuvo, Gilma Vigil es del branch 718.
+       * No hay a quién resolverlas.
        *
-       * Se cargan igual, con el nulo a la vista: taparlo acá escondería el
-       * defecto. Cuando se arregle arriba, el barrido reemplaza las filas.
+       * ⚠ EL SUFIJO `(I)` NO ES LA CAUSA, aunque lo parezca. Las 288 lo traen
+       * --'Aguilar Soto, Susan (I)'-- y ninguna de las resueltas, así que la
+       * correlación es perfecta y la conclusión, equivocada: verificado el
+       * 2026-09-16 quitándolo antes de emparejar, siguieron siendo las mismas.
+       * El sufijo acompaña a la gente de afuera, no la desempareja.
        *
-       * Por esto la identidad es `emp_no` y no esto.
+       * De las 32 que había antes, UNA SOLA era un defecto real: Susan Aguilar,
+       * que Compensafe escribe con el segundo apellido ('Aguilar Soto') y el
+       * roster no. Se resolvió con un alias, y por eso son 288 y no 292.
+       *
+       * Se cargan con el nulo a la vista: es el estado real. Y por esto la
+       * identidad es `emp_no` y no esto.
        */
       'person_code',
       'person_name',
@@ -2007,12 +2014,15 @@ const SYNCS: TableSync[] = [
        * plata que se pagó y después se reclamó. El neto es correcto para el
        * P&L; NO lo es para contestar "cuánto se le pagó" a una persona.
        *
-       * Verificado: las 252 recapturas tienen `amount < 0`, sin excepción -- más
-       * fuerte que "suele ser negativo", y sirve de invariante.
+       * EL INVARIANTE VA EN ESTA DIRECCIÓN Y SÓLO EN ÉSTA:
        *
-       * ⚠ PERO AL REVÉS NO VALE: 17 filas tienen monto negativo SIN ser
-       * recapturas, y son de `pay_type` 'Bonus' y 'Commission'. Tomar el signo
-       * como sinónimo de recaptura las etiqueta mal. La columna es ésta.
+       *   `is_recapture` implica `amount < 0`     las 252, sin excepción
+       *   `amount < 0` implica `is_recapture`     FALSO: 17 filas negativas son
+       *                                           'Bonus' y 'Commission'
+       *
+       * Escrito al derecho es comprobable y más fuerte que "suele ser negativo".
+       * Leído al revés etiqueta mal esas 17: el signo no dice qué es una fila,
+       * lo dice esta columna.
        */
       'is_recapture',
       // Con su nombre de origen, a propósito. Ver la nota 3 de arriba.
