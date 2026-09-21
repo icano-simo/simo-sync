@@ -641,6 +641,28 @@ const SYNCS: TableSync[] = [
       // La vista no expone is_b2b: se deriva de la estrategia, que ya resuelve
       // la precedencia Affinity > NPPM > Recruitment > B2B > Own Production.
       "strategy = 'B2B' AS is_b2b",
+      /*
+       * ⚠ LA MISMA PUERTA, PARA RECRUITMENT. `fct_commercial_activity` tampoco
+       * la expone, y era el ULTIMO campo que el P&L seguia leyendo de
+       * `finance_division.loan_officials` -- el archivo que se sube a mano y
+       * lleva parado desde el 2026-08-20.
+       *
+       * Va pegada a `is_b2b` y con la misma forma a proposito: son dos
+       * derivaciones del MISMO `strategy`, y separarlas es como una de las dos
+       * se queda atras cuando cambie la precedencia.
+       *
+       * Medido el 2026-09-21: `is_b2b` es EXACTAMENTE `strategy = 'B2B'` --800
+       * y 800, cero divergencia en los dos sentidos-- asi que la forma se
+       * copia sin dudar de que signifique otra cosa. Y `strategy =
+       * 'Recruitment'` son 299 filas del espejo.
+       *
+       * ⚠ EXCLUYENTE CON is_b2b, y eso cambia una semantica. `loan_officials`
+       * tenia `b2b` y `recruitment` como casillas independientes y un prestamo
+       * podia llevar las dos; `strategy` es un valor unico y la precedencia
+       * elige. Hay UN caso --747002052489, marcado recruitment a mano y `B2B`
+       * en el espejo-- y con esto deja de ser el conflicto que era.
+       */
+      "strategy = 'Recruitment' AS is_recruitment",
       'referred_by_realtor',
       'buyers_agent',
       'nppm_realtor',
