@@ -620,6 +620,20 @@ const SYNCS: TableSync[] = [
        * puede mirar desde Supabase.
        */
       'last_finished_milestone',
+      /*
+       * ⚠ PUEDE SER NULA EN UN PRÉSTAMO CERRADO, y no es un defecto: Encompass
+       * no siempre registra el hito. Al 2026-09-21 la tienen 458 préstamos, y 63
+       * de los 508 cerrados NO la tienen.
+       *
+       * Así que contar cierres por esta fecha pierde esos 63. Para cierres sigue
+       * valiendo `closing_date` con `counts_for_division` -- ver el invariante de
+       * arriba. Ésta sirve para medir el tramo hasta el clear to close, no para
+       * decir si un préstamo cerró.
+       *
+       * Los otros hitos --`ms_started`, `ms_submitted`, `ms_funding`-- y
+       * `days_submitted_to_ctc` NO se traen. Están en BigQuery si hacen falta.
+       */
+      'ms_clear_to_close',
       'strategy',
       'loan_officer_strategy',
       'has_salesforce',
