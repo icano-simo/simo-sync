@@ -4,7 +4,7 @@ import { getSupabaseClient } from '@/lib/supabase-admin';
 
 /**
  * ============================================================================
- * PIPELINE: lending_marts.pipeline_snapshot -> pipeline_forecast.*
+ * PIPELINE: lending_marts.pipeline_snapshot_staff -> pipeline_forecast.*
  * ============================================================================
  *
  * El pipeline es una FOTO DIARIA. Salesforce sólo guarda el estado actual y su
@@ -130,12 +130,45 @@ const MAX_SNAPSHOTS_PER_DAY = 2;
  * aterrizaje desde el principio, pero sin proyectar en `pipeline_snapshot`, así
  * que las columnas de Supabase existían y no tenían de dónde llenarse. Se
  * arreglaron las dos mitades: la vista arriba y esta proyección acá.
+ *
+ * ---------------------------------------------------------------------------
+ * LAS TRES DEL EQUIPO, RESUELTAS CONTRA EL ROSTER
+ * ---------------------------------------------------------------------------
+ * La fuente pasó a `pipeline_snapshot_staff` el 2026-09-21: la misma vista más
+ * seis columnas --`*_person_code` y `*_display` para processor, loa2 y loa_2--.
+ *
+ * ⚠ VERIFICADO QUE NO AGREGA FILAS, que era el riesgo del JOIN: 15.279 en las
+ * dos vistas, y las únicas columnas nuevas son esas seis. Si algún día el
+ * conteo cambia al mover esta fuente, el JOIN multiplica y hay que mirarlo
+ * ANTES de escribir el snapshot.
+ *
+ * ⚠ UN `person_code` NULO ES LO ESPERADO, Y LA PROPORCIÓN ES LA ALARMA. El
+ * pipeline trae procesadores de todo Supreme, no sólo de la división, así que
+ * cerca de la mitad no resuelve y eso es correcto. Medido sobre el snapshot del
+ * 2026-09-21, 1.075 filas:
+ *
+ *   loan_processor   924 con nombre, 538 resueltos    58%
+ *   loa2             399 con nombre, 392 resueltos    98%
+ *   loa_2            631 con nombre, 576 resueltos    91%
+ *
+ * SI `loan_processor` SE ACERCARA AL 100%, ESA sería la señal: querría decir
+ * que se está resolviendo gente que no es de la división. El 58% es la salud,
+ * no el defecto.
+ *
+ * Que los dos LOA estén tan alto es coherente y no la misma alarma: los LO
+ * Assistants del pipeline son de la división --Monica Fernandez, Igleth
+ * Mercado, Claudia Velasco, Daniela Esguerra-- mientras que los procesadores
+ * vienen de toda la empresa. Son dos poblaciones distintas y por eso dos tasas
+ * distintas; conviene mirarlas por separado y no contra un mismo umbral.
+ *
+ * INVARIANTE comprobado el 2026-09-21: un `*_person_code` no nulo implica su
+ * `*_display` no nulo. Un código sin nombre dejaría la pantalla en blanco.
  */
 function buildQuery(): string {
   return `
     WITH ultimo AS (
       SELECT MAX(snapshot_date) AS d
-      FROM \`lending_marts.pipeline_snapshot\`
+      FROM \`lending_marts.pipeline_snapshot_staff\`
     )
     SELECT
       v.snapshot_date,
@@ -164,6 +197,13 @@ function buildQuery(): string {
       v.loan_processor,
       v.loa2,
       v.loa_2,
+      -- Las mismas tres, resueltas contra el roster. Ver la nota de arriba.
+      v.loan_processor_person_code,
+      v.loa2_person_code,
+      v.loa_2_person_code,
+      v.loan_processor_display,
+      v.loa2_display,
+      v.loa_2_display,
       v.loan_status,
       v.loan_type,
       v.loan_program,
@@ -176,7 +216,7 @@ function buildQuery(): string {
       v.nppm_realtor,
       v.referred_by,
       IF(v.affinity_program, 'true', '')       AS affinity_program
-    FROM \`lending_marts.pipeline_snapshot\` v, ultimo
+    FROM \`lending_marts.pipeline_snapshot_staff\` v, ultimo
     WHERE v.snapshot_date = ultimo.d
   `;
 }
@@ -350,6 +390,13 @@ export async function syncPipelineSnapshot(
     loan_processor: r.loan_processor,
     loa2: r.loa2,
     loa_2: r.loa_2,
+    // Resueltos contra el roster. Nulos para quien es de otro branch.
+    loan_processor_person_code: r.loan_processor_person_code,
+    loa2_person_code: r.loa2_person_code,
+    loa_2_person_code: r.loa_2_person_code,
+    loan_processor_display: r.loan_processor_display,
+    loa2_display: r.loa2_display,
+    loa_2_display: r.loa_2_display,
     borrower_name: r.borrower_name,
     milestone_date: r.milestone_date,
     branch_transferred: r.branch_transferred,
@@ -380,6 +427,13 @@ export async function syncPipelineSnapshot(
     loan_processor: r.loan_processor,
     loa2: r.loa2,
     loa_2: r.loa_2,
+    // Las mismas seis que en pipeline_loans: un prestamo resuelto tuvo equipo.
+    loan_processor_person_code: r.loan_processor_person_code,
+    loa2_person_code: r.loa2_person_code,
+    loa_2_person_code: r.loa_2_person_code,
+    loan_processor_display: r.loan_processor_display,
+    loa2_display: r.loa2_display,
+    loa_2_display: r.loa_2_display,
     loan_status: r.loan_status,
     disbursement_date: r.disbursement_date,
     est_closing_date: r.est_closing_date,
