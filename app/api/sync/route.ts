@@ -601,6 +601,42 @@ const SYNCS: TableSync[] = [
       'application_date AS app_date',
       'closing_date',
       'closing_month',
+      /*
+       * ------------------------------------------------------------------
+       * ⚠ DOS ESTIMACIONES DE CIERRE, Y LA DIFERENCIA ES EL INDICADOR
+       * ------------------------------------------------------------------
+       *   org_est_closing_date   `Org_Est_Closing_Date__c`. La estimación
+       *                          ORIGINAL, fijada una vez. NO se mueve.
+       *   sf_est_closing_date    `Est_Closing_Date__c`. La estimación VIGENTE,
+       *                          que se corre cada vez que se aplaza el cierre.
+       *
+       * ⚠ PARA "ON TIME / DELAYED" VA LA ORIGINAL. Medir contra la vigente da
+       * SIEMPRE "a tiempo", porque ese campo persigue al atraso: se actualiza
+       * justamente cuando el préstamo se retrasa. Difieren en 414
+       * oportunidades, así que no es una distinción teórica.
+       *
+       * Por eso viajan LAS DOS: la vigente sirve para saber cuándo se espera
+       * cerrar hoy, la original para saber si se cumplió lo prometido. Una sola
+       * no contesta las dos preguntas.
+       *
+       * ⚠ SIN LA ORIGINAL NO ES "A TIEMPO": ES DESCONOCIDO. 508 de los 514
+       * cierres de división la tienen; los 6 restantes no pertenecen a ninguno
+       * de los dos grupos, y meterlos en cualquiera inventa un resultado. Van a
+       * un tercer bucket.
+       *
+       * ⚠ Y OJO CON EL SIGNO. Al 2026-09-28, sobre los cierres de división:
+       *
+       *   atrasados            302    10,5 días de promedio
+       *   a tiempo             206    -0,6 días
+       *   sin fecha original     6
+       *
+       * El -0,6 de "a tiempo" es que cierran medio día ANTES de lo estimado. Si
+       * la pantalla muestra "días de atraso", ese número va en positivo o se
+       * rotula como días de anticipación -- mostrarlo crudo dice lo contrario
+       * de lo que pasa.
+       */
+      'org_est_closing_date',
+      'sf_est_closing_date',
       'is_closed',
       'counts_for_division',
       'is_second_lien_heloc',
