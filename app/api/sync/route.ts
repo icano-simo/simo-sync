@@ -2287,11 +2287,26 @@ const SYNCS: TableSync[] = [
      * O sea que la edición se pierde y el rastro de quién la hizo queda, ahora
      * apuntando a un valor que nadie puso. Peor que perder las dos cosas.
      *
-     * LA SALIDA VA EN LA TABLA, NO ACÁ: un trigger `BEFORE UPDATE` que, cuando
-     * `OLD.origen = 'app'`, conserve las cuatro columnas. En la base protege
-     * contra CUALQUIER escritor -- este job, un script, una corrección a mano --
-     * y no depende de que el próximo spec se acuerde. Es el mismo criterio por
-     * el que el append-only de `outlook` se impone con RLS y no con disciplina.
+     * LA SALIDA ESTÁ EN LA TABLA, NO ACÁ: el trigger
+     * `margins.proteger_filas_de_la_app()`, puesto el 2026-10-01.
+     *
+     *   si OLD.origen = 'app' AND NEW.origen = 'archivo'
+     *      -> conserva valor_bps, origen, changed_by, changed_at y reason
+     *
+     * ⚠ LA CONDICIÓN MIRA LAS DOS PUNTAS, no sólo la vieja, y esa es la parte
+     * fina. Si bloqueara con sólo `OLD.origen = 'app'`, una edición NUEVA de la
+     * app sobre una fila ya editada también quedaría bloqueada -- o sea que
+     * proteger de más haría la tabla inmutable después de la primera edición.
+     *
+     * La regla no depende de QUIÉN escribe sino de lo que la escritura DECLARA:
+     * el sync siempre manda 'archivo', la app siempre 'app'. Probado en los dos
+     * sentidos: sync sobre fila de app queda protegida con su `changed_by`
+     * intacto; app sobre fila de app pasa y queda el autor nuevo.
+     *
+     * En la base protege contra CUALQUIER escritor --este job, un script, una
+     * corrección a mano-- y no depende de que el próximo spec se acuerde. Es el
+     * mismo criterio por el que el append-only de `outlook` se impone con RLS y
+     * no con disciplina.
      *
      * ------------------------------------------------------------------------
      * LA CLAVE INCLUYE LA VERSIÓN, A PROPÓSITO
