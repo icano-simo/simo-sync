@@ -2530,7 +2530,80 @@ type TableResult = {
    * respuesta se lee igual que una que se escribió sin problemas.
    */
   omitida_por?: string;
+  /** Para la bitácora. Ver `writeSyncLog`. */
+  grupo?: SyncGroup;
 };
+
+/**
+ * ============================================================================
+ * LA BITÁCORA DE LA CORRIDA -- `uploads.sync_log`
+ * ============================================================================
+ *
+ * Una fila por tabla y por corrida. SÓLO INSERT: es bitácora, no estado.
+ *
+ * ⚠ POR QUÉ EXISTE, Y CUÁNTO COSTÓ NO TENERLA. El 2026-09-22 una reescritura
+ * de `fct_future_loan_officer` se llevó tres columnas, y el sync falló TODAS las
+ * noches durante NUEVE DÍAS con el mensaje exacto en el log de Vercel. Nadie se
+ * enteró.
+ *
+ * El problema no fue que callara: fue que el único lugar donde habla es un log
+ * que nadie mira. Y el estado que deja lo vuelve indistinguible de que todo
+ * funcione -- el upsert sólo escribe las columnas del payload, así que una
+ * columna que dejó de llegar CONSERVA SU ÚLTIMO VALOR BUENO y parece vigente.
+ *
+ * Es el mismo arreglo que `load_log.sync_status` para las cargas: que un fallo
+ * no rompa nada no puede significar que nadie se entere.
+ *
+ * ⚠ `status = 'skipped'` CON `omitida_por` ES LA PUERTA DE FRESCURA FUNCIONANDO,
+ * no una falla. Se distingue en el DATO y no sólo en el texto, porque quien
+ * consulte esta tabla va a filtrar por `status` y no a leer prosa.
+ *
+ * ⚠ Y `coincide = false` NO ES UN FALLO EN LAS NO BARRIBLES CON FILAS PROPIAS:
+ * `org.roster_current` conserva a quien sale, `org.person_name_key` tiene
+ * correcciones a mano, y `margins.branch_margin` va a tener las ediciones de la
+ * app. Esas tres NO PUEDEN cuadrar contra su origen por diseño. Si eso no queda
+ * dicho, la columna entrena a ignorar la verificación entera -- que es el mismo
+ * daño que una alerta con el umbral más ajustado que la variación normal.
+ *
+ * NUNCA HACE FALLAR LA CORRIDA. Llega cuando las tablas ya se escribieron y no
+ * hay a quién avisarle salvo el log del servidor; romper el sync por no poder
+ * anotar lo que hizo sería cambiar el problema por uno peor.
+ */
+async function writeSyncLog(
+  runId: string,
+  startedAt: string,
+  filas: TableResult[],
+): Promise<void> {
+  try {
+    const rows = filas.map((r) => ({
+      run_id: runId,
+      started_at: startedAt,
+      tabla: r.tabla,
+      grupo: r.grupo ?? null,
+      status: r.omitida_por ? 'skipped' : r.error ? 'failed' : 'ok',
+      filas_bigquery: r.filas_bigquery,
+      filas_supabase: r.filas_supabase,
+      filas_borradas: r.filas_borradas,
+      coincide: r.coincide,
+      duracion_ms: r.duracion_ms,
+      error: r.error,
+      omitida_por: r.omitida_por ?? null,
+    }));
+
+    const { error } = await getSupabaseClient('uploads').from('sync_log').insert(rows);
+
+    if (error) {
+      console.error(
+        `[sync] no se pudo escribir la bitácora (${rows.length} filas): ${error.message}`,
+      );
+    }
+  } catch (err) {
+    console.error(
+      '[sync] no se pudo escribir la bitácora: ' +
+        (err instanceof Error ? err.message : String(err)),
+    );
+  }
+}
 
 /** Constant-time compare so the secret cannot be recovered byte by byte. */
 function isAuthorized(req: NextRequest): boolean {
@@ -2806,6 +2879,13 @@ async function syncTable(
 
 export async function GET(req: NextRequest) {
   const started = Date.now();
+  /*
+   * Identifica ESTA corrida en `uploads.sync_log`. Va acá y no por tabla: es lo
+   * que permite preguntar "qué pasó en la corrida de las 12:00" en vez de tener
+   * que reconstruirla por timestamps cercanos, que es justo lo que no se puede
+   * hacer con un log de texto.
+   */
+  const runId = crypto.randomUUID();
 
   if (!isAuthorized(req)) {
     return Response.json({ ok: false, error: 'unauthorized' }, { status: 401 });
@@ -2886,6 +2966,7 @@ export async function GET(req: NextRequest) {
     if (!puerta.puede_escribir) {
       console.warn(`[sync] ${spec.name}: omitida, ${puerta.motivo}`);
       omitidas.push({
+        grupo: groupOf(spec),
         tabla: qualified(spec),
         filas_bigquery: 0,
         filas_supabase: null,
@@ -2901,11 +2982,15 @@ export async function GET(req: NextRequest) {
     try {
       // Un cliente por schema: `db.schema` se fija al construir y no se puede
       // cambiar por consulta. Vienen cacheados, así que esto no abre conexiones.
-      resultados.push(await syncTable(spec, bq, getSupabaseClient(spec.schema), syncedAt));
+      resultados.push({
+        ...(await syncTable(spec, bq, getSupabaseClient(spec.schema), syncedAt)),
+        grupo: groupOf(spec),
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[sync] ${spec.name} failed: ${message}`);
       resultados.push({
+        grupo: groupOf(spec),
         tabla: qualified(spec),
         filas_bigquery: 0,
         filas_supabase: null,
@@ -2932,6 +3017,7 @@ export async function GET(req: NextRequest) {
     const motivo = (puertas.get('core') as Extract<GateResult, { puede_escribir: false }>).motivo;
     console.warn(`[sync] pipeline: omitido, ${motivo}`);
     omitidas.push({
+      grupo: 'core',
       tabla: `${PIPELINE_SCHEMA}.pipeline_snapshots (+loans, +resolved)`,
       filas_bigquery: 0,
       filas_supabase: null,
@@ -2950,6 +3036,7 @@ export async function GET(req: NextRequest) {
         (detalle.omitido ? ` omitido=${detalle.omitido}` : ''),
     );
     resultados.push({
+      grupo: 'core',
       tabla: `${PIPELINE_SCHEMA}.pipeline_snapshots (+loans, +resolved)`,
       filas_bigquery: detalle.filas_origen,
       filas_supabase:
@@ -2967,6 +3054,7 @@ export async function GET(req: NextRequest) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[sync] pipeline failed: ${message}`);
     resultados.push({
+      grupo: 'core',
       tabla: `${PIPELINE_SCHEMA}.pipeline_snapshots (+loans, +resolved)`,
       filas_bigquery: 0,
       filas_supabase: null,
@@ -2976,6 +3064,17 @@ export async function GET(req: NextRequest) {
       error: message,
     });
   }
+
+  /*
+   * La bitacora, con TODO lo de esta corrida: lo que escribio, lo que fallo y
+   * lo que la puerta omitio. Va aca --no dentro del bucle-- porque es un solo
+   * insert en vez de diecisiete, y porque a esta altura ya no hay nada que
+   * pueda cambiar un resultado.
+   *
+   * No se espera con `await` ningun comportamiento del sync: `writeSyncLog`
+   * nunca lanza. Ver su nota.
+   */
+  await writeSyncLog(runId, new Date(started).toISOString(), [...resultados, ...omitidas]);
 
   const fallidas = resultados.filter((r) => r.error !== null);
   const desajustadas = resultados.filter((r) => r.error === null && !r.coincide);
