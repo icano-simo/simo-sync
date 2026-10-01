@@ -1338,12 +1338,39 @@ const SYNCS: TableSync[] = [
      * decía el origen, para poder rastrear de dónde salió cada uno.
      *
      * ------------------------------------------------------------------------
-     * `era_duplicado` HOY ES false EN LAS 19
+     * `era_duplicado` YA NO ESTÁ EN CERO, Y AHORA SÍ SE PUEDE VALIDAR
      * ------------------------------------------------------------------------
-     * Marca a quien venía con la marca (DUPLICATE) en el nombre, que la vista
-     * descarta antes de comparar. Que hoy no haya ninguno no significa que la
-     * columna sobre: significa que la limpieza de arriba está al día. No se
-     * puede validar contra el dato mientras siga en cero.
+     * Marca a quien absorbió un duplicado: el nombre de RRHH que se quedó con
+     * una fila de Salesforce que era la misma persona. Esta nota decía que
+     * estaba en false en las 19 y que por eso no se podía validar contra el
+     * dato; dejó de ser cierto cuando entró la deduplicación por contención.
+     *
+     * Al 2026-10-01: 23 reclutas, 2 con `era_duplicado` -- Ivan Ibarra y
+     * Victoria Zambrano.
+     *
+     * ⚠ ESOS DOS NOMBRES CAMBIAN, y no por un defecto. Diego Garzaro era uno
+     * hasta que entró al roster y salió del pipeline por la regla de siempre:
+     * una vez en el roster, EL ROSTER MANDA. Así que la verificación no es
+     * "estos dos", es que `era_duplicado` tenga alguno mientras la fuente siga
+     * trayendo duplicados.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ ESTA VISTA YA PERDIÓ COLUMNAS EN UNA REESCRITURA, Y NADIE SE ENTERÓ
+     * ------------------------------------------------------------------------
+     * El 2026-09-22, al armar la deduplicación por contención, la reescritura de
+     * `fct_future_loan_officer` se llevó `nombre_normalizado`,
+     * `nombre_en_salesforce` y `era_duplicado` sin que nada avisara.
+     *
+     * El sync SÍ falló --«Unrecognized name: nombre_normalizado»-- y falló
+     * TODAS las noches durante nueve días. Pero ese error vive sólo en el log de
+     * Vercel, así que la tabla se quedó quieta y en la app no se notó.
+     *
+     * ⚠ Y OJO CON EL ESTADO QUE DEJA: el upsert sólo escribe las columnas del
+     * payload, así que cuando un spec pierde una columna, la de Supabase NO se
+     * vacía -- conserva el último valor bueno y parece vigente. Acá no hubo
+     * daño porque los valores eran correctos y volvieron a actualizarse; pero
+     * una columna que dejó de llegar y sigue mostrando algo es indistinguible de
+     * una que llega bien.
      *
      * ------------------------------------------------------------------------
      * QUÉ VERIFICAR DESPUÉS DE UNA CORRIDA
@@ -1372,8 +1399,10 @@ const SYNCS: TableSync[] = [
      *     y devuelve en `coincide`.
      *
      * Comprobados todos el 2026-09-03, con 19 filas: 15 `producira`, 3
-     * `es_nppm`, 5 `sin_branch_asignado` y confianza en 6/1/8/4. Esos números
-     * son la foto de ese día, no el criterio.
+     * `es_nppm`, 5 `sin_branch_asignado` y confianza en 6/1/8/4. Al 2026-10-01
+     * son 23 reclutas. Esos números son la foto de su día, no el criterio --
+     * entre una fecha y la otra el tablero pasó de 42 a 47 filas y alguien salió
+     * del pipeline por entrar al roster.
      */
     name: 'future_loan_officer',
     source: 'lending_marts.fct_future_loan_officer',
