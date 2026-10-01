@@ -176,6 +176,19 @@ const SWEEPABLE = new Set([
    */
   'org.nppm_realtor',
   /*
+   * ⚠ `margins.branch_margin` TAMPOCO ESTÁ, Y ES LA SEGUNDA EXCEPCIÓN.
+   *
+   * Es la primera tabla del proyecto que LA APP ESCRIBE: las filas editadas
+   * llevan `origen = 'app'` y no existen en BigQuery. Un barrido las borraría
+   * en la corrida siguiente, sin fallar -- limpiar no es un error para el
+   * barrido, es su trabajo.
+   *
+   * Distinta del roster en el motivo: allá se conserva la historia de alguien
+   * que dejó de aparecer; acá se conserva una decisión que alguien tomó en la
+   * app. Igual en la consecuencia: la tabla tiene filas propias y por eso no
+   * puede cuadrar contra su origen.
+   */
+  /*
    * ⚠ `org.roster_current` NO ESTÁ ACÁ, Y NO ES UN OLVIDO.
    *
    * El sweep borra las filas que no volvieron a aparecer arriba. Para las otras
@@ -2224,6 +2237,127 @@ const SYNCS: TableSync[] = [
       'sf_nppm_flag',
       'sf_closed_won',
       'match_key',
+    ].join(', '),
+  },
+  {
+    /*
+     * ========================================================================
+     * MÁRGENES POR BRANCH -- Y LA PRIMERA TABLA QUE LA APP ESCRIBE
+     * ========================================================================
+     *
+     * 726 filas, 726 `margin_key` distintas, 21 branches. 8 columnas más
+     * `synced_at`.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ ESTO ROMPE EL PATRÓN DEL JOB, A PROPÓSITO
+     * ------------------------------------------------------------------------
+     * Hasta acá Supabase era un ESPEJO DE LECTURA: todo venía de BigQuery y la
+     * app no escribía nada de negocio. Esta tabla no: la app va a editar
+     * márgenes, y esas filas llevan `origen = 'app'`. Decisión de la usuaria del
+     * 2026-10-01.
+     *
+     * ⚠ POR ESO NO ESTÁ EN `SWEEPABLE`, y la ausencia NO es un olvido. Las filas
+     * con `origen = 'app'` no existen en BigQuery, así que un barrido las
+     * borraría en la corrida siguiente -- en silencio, porque el barrido no
+     * falla, limpia.
+     *
+     * ⚠ Y HAY UNA CONSECUENCIA QUE VA A APARECER EN CADA CORRIDA: `coincide`
+     * dará FALSE en cuanto exista la primera fila de la app. `syncTable` compara
+     * el conteo de Supabase contra el de BigQuery, y Supabase va a tener más.
+     * Es lo mismo que pasa con `org.roster_current` --115 contra 112-- y por la
+     * misma razón: una tabla con filas propias no puede cuadrar contra su
+     * origen. No es un defecto; conviene saberlo antes de perseguirlo.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ EL UPSERT PISA `origen` Y `valor_bps` DE UNA FILA EDITADA
+     * ------------------------------------------------------------------------
+     * Y es la parte que este job NO puede resolver solo. `syncTable` hace
+     * `upsert(batch, { onConflict, ignoreDuplicates: false })`, que en Postgres
+     * es `ON CONFLICT DO UPDATE SET <cada columna del payload> = EXCLUDED....`.
+     * No hay forma de expresar un "actualizá sólo si no es de la app" por
+     * PostgREST.
+     *
+     * Para una fila que la app editó EN SU LUGAR --mismo `margin_key`, `origen`
+     * cambiado a 'app'-- el resultado es la peor combinación posible:
+     *
+     *   origen, valor_bps        en el payload  -> VUELVEN a los del archivo
+     *   changed_by, changed_at,
+     *     reason                 NO en el payload -> SOBREVIVEN
+     *
+     * O sea que la edición se pierde y el rastro de quién la hizo queda, ahora
+     * apuntando a un valor que nadie puso. Peor que perder las dos cosas.
+     *
+     * LA SALIDA ESTÁ EN LA TABLA, NO ACÁ: el trigger
+     * `margins.proteger_filas_de_la_app()`, puesto el 2026-10-01.
+     *
+     *   si OLD.origen = 'app' AND NEW.origen = 'archivo'
+     *      -> conserva valor_bps, origen, changed_by, changed_at y reason
+     *
+     * ⚠ LA CONDICIÓN MIRA LAS DOS PUNTAS, no sólo la vieja, y esa es la parte
+     * fina. Si bloqueara con sólo `OLD.origen = 'app'`, una edición NUEVA de la
+     * app sobre una fila ya editada también quedaría bloqueada -- o sea que
+     * proteger de más haría la tabla inmutable después de la primera edición.
+     *
+     * La regla no depende de QUIÉN escribe sino de lo que la escritura DECLARA:
+     * el sync siempre manda 'archivo', la app siempre 'app'. Probado en los dos
+     * sentidos: sync sobre fila de app queda protegida con su `changed_by`
+     * intacto; app sobre fila de app pasa y queda el autor nuevo.
+     *
+     * En la base protege contra CUALQUIER escritor --este job, un script, una
+     * corrección a mano-- y no depende de que el próximo spec se acuerde. Es el
+     * mismo criterio por el que el append-only de `outlook` se impone con RLS y
+     * no con disciplina.
+     *
+     * ------------------------------------------------------------------------
+     * LA CLAVE INCLUYE LA VERSIÓN, A PROPÓSITO
+     * ------------------------------------------------------------------------
+     * Sin ella una versión nueva pisaría a la anterior y se perdería el
+     * histórico; con ella conviven. Por eso viajan las 726 filas y no sólo las
+     * 609 vigentes. Cuál rige lo resuelve la vista de arriba, no esta tabla.
+     *
+     * ⚠ `version` ES TEXTO y 'v10' ordena antes que 'v2'. El orden va por
+     * `version_num`, que la vista ya trae calculado. No ordenar por `version`.
+     *
+     * ------------------------------------------------------------------------
+     * ⚠ TAREA ABIERTA: BIGQUERY NO SE ENTERA DE LO QUE ESCRIBE LA APP
+     * ------------------------------------------------------------------------
+     * `mart_margin_chain`, que alimenta el P&L, sigue leyendo el archivo.
+     * Mientras haya filas con `origen = 'app'`, las dos cifras DIVERGEN.
+     *
+     * Hoy es aceptable porque el P&L usa el archivo. Si algún día empieza a usar
+     * márgenes editados, hay que construir el camino de vuelta. Queda escrito
+     * acá para que sea una tarea pendiente y no algo que alguien descubra el día
+     * que dos números no cuadren.
+     *
+     * ------------------------------------------------------------------------
+     * QUÉ VERIFICAR DESPUÉS DE UNA CORRIDA
+     * ------------------------------------------------------------------------
+     *   COUNT(*) = COUNT(DISTINCT margin_key), sin nulos.
+     *   21 branches distintos -- y si cambia, cambió el archivo, no el mapeo.
+     *   Todas con `origen = 'archivo'` HASTA que alguien edite la primera.
+     *   `version_num` no nulo donde `version` no es nulo: es lo que hace que el
+     *     orden no dependa del texto.
+     *   ⚠ `coincide` en false NO es un fallo acá. Ver arriba.
+     */
+    name: 'branch_margin',
+    source: 'comp_marts.branch_margin_sync',
+    target: 'branch_margin',
+    schema: 'margins',
+    conflict: 'margin_key',
+    group: 'comp',
+    // Las 8 listadas, no `*`: ver la nota de `lo_recruitment`.
+    select: [
+      // La clave. Incluye la versión -- ver la nota de arriba.
+      'margin_key',
+      'branch_code',
+      'loan_type',
+      'tipo_de_margen',
+      'version',
+      // Por acá va el orden, nunca por `version`, que es texto.
+      'version_num',
+      'valor_bps',
+      // 'archivo' acá; la app escribe 'app'. El upsert lo pisa -- ver la nota.
+      'origen',
     ].join(', '),
   },
 ];
