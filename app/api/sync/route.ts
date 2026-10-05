@@ -1437,6 +1437,22 @@ const SYNCS: TableSync[] = [
       'confianza',
       'producira',
       'es_nppm',
+      /*
+       * ⚠ NULA EN LAS DE `origen = 'hr_pipeline'`, Y ES ESTRUCTURAL. Sale de la
+       * oportunidad de Salesforce, y las del tablero de RRHH no tienen
+       * oportunidad: no hay de dónde sacarla. No es un campo a medio llenar ni
+       * algo que se vaya a poblar más adelante.
+       *
+       * Al 2026-10-05: poblada en 11 de las 14 de Salesforce, nula en las 10 del
+       * tablero. O sea que un NULL acá NO distingue "falta el dato" de "no
+       * aplica" -- eso lo dice `origen`, y cualquier conteo sobre esta columna
+       * tiene que partir por ahí primero.
+       *
+       * Toma tres valores: 'Low' (7), 'High' (3) y 'Medium' (1). Está acotada,
+       * pero NO hay CHECK que lo garantice ni acá ni arriba, así que un valor
+       * nuevo entraría sin avisar.
+       */
+      'importance',
     ].join(', '),
   },
   {
